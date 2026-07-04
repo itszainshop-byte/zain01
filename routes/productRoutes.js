@@ -22,7 +22,6 @@ import {
 import { videoUpload } from '../middleware/videoUpload.js';
 import {
   getAllReviews,
-  getProductReviews,
   addReview,
   updateReview,
   markReviewHelpful,
@@ -86,7 +85,6 @@ router.delete('/:id', adminAuth, deleteProduct);
 
 // Review routes
 router.get('/reviews/all', adminAuth, getAllReviews);
-router.get('/:id/reviews', getProductReviews);
 router.get('/:id/reviews/eligibility', auth, getReviewEligibility);
 router.post('/:id/reviews', auth, addReview);
 router.patch('/:id/reviews/:reviewId', auth, updateReview);

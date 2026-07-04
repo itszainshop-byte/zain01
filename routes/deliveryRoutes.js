@@ -8,8 +8,6 @@ import {
   updateCompany,
   deleteCompany,
   updateFieldMappings,
-  getAreaMappings,
-  updateAreaMappings,
   calculateDeliveryFee,
   sendOrder,
   sendOrderWithOrderPayload,
@@ -19,10 +17,8 @@ import {
   listDeliveryOrders,
   testConnection,
   validateCompanyConfig,
-  proxyExternalList,
   batchAssignOrders,
   batchSendOrders,
-  deliveryStatusWebhook,
 } from '../controllers/deliveryController.js';
 
 const router = express.Router();
@@ -41,21 +37,13 @@ router.get('/companies/:id', deliveryAdminGuard, getCompany);
 router.put('/companies/:id', deliveryAdminGuard, updateCompany);
 router.delete('/companies/:id', deliveryAdminGuard, deleteCompany);
 router.put('/companies/:id/field-mappings', deliveryAdminGuard, updateFieldMappings);
-router.get('/companies/:id/area-mappings', deliveryAdminGuard, getAreaMappings);
-router.put('/companies/:id/area-mappings', deliveryAdminGuard, updateAreaMappings);
 router.post('/companies/:id/test-connection', deliveryAdminGuard, testConnection);
 // Validate config + show effective db sources
 router.get('/companies/:id/validate-config', deliveryAdminGuard, validateCompanyConfig);
 router.get('/companies/:id/validate-config', deliveryAdminGuard, validateCompanyConfig);
 
-// Proxy external list (areas/sub-areas) to avoid CORS in admin UI
-router.post('/proxy', deliveryAdminGuard, proxyExternalList);
-
 // Public companies listing for checkout
 router.get('/companies/public/active', listActiveCompanies);
-
-// Delivery status webhook (public with bearer token)
-router.post('/webhook/status', deliveryStatusWebhook);
 
 // Fee calculation for a company
 router.post('/companies/:id/calculate-fee', calculateDeliveryFee);

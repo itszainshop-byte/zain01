@@ -5,6 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { adminAuth, auth } from '../middleware/auth.js';
 import Settings from '../models/Settings.js';
+import Inventory from '../models/Inventory.js';
 import { ensureCloudinaryConfig, hasCloudinaryCredentials } from '../services/cloudinaryConfigService.js';
 import cloudinary from '../services/cloudinaryClient.js';
 
@@ -248,38 +249,6 @@ router.get('/', async (req, res) => {
           defaultDiscount: Number(obj.payments.icredit.defaultDiscount) || 0
         };
       }
-      if (obj.payments.meshulam) {
-        obj.payments.meshulam = {
-          enabled: !!obj.payments.meshulam.enabled,
-          apiUrl: obj.payments.meshulam.apiUrl || 'https://sandbox.meshulam.co.il/api/light/server/1.0/createPaymentProcess',
-          approveUrl: obj.payments.meshulam.approveUrl || 'https://sandbox.meshulam.co.il/api/light/server/1.0/approveTransaction',
-          pageType: obj.payments.meshulam.pageType || '',
-          pageCode: obj.payments.meshulam.pageCode || '',
-          userId: obj.payments.meshulam.userId || '',
-          apiKey: obj.payments.meshulam.apiKey ? '***' : '',
-          successUrl: obj.payments.meshulam.successUrl || '',
-          cancelUrl: obj.payments.meshulam.cancelUrl || '',
-          notifyUrl: obj.payments.meshulam.notifyUrl || ''
-        };
-      }
-      if (obj.payments.hypay) {
-        obj.payments.hypay = {
-          enabled: !!obj.payments.hypay.enabled,
-          masof: obj.payments.hypay.masof || '',
-          apiKey: obj.payments.hypay.apiKey ? '***' : '',
-          passp: obj.payments.hypay.passp ? '***' : '',
-          info: obj.payments.hypay.info || 'Online order',
-          pageLang: obj.payments.hypay.pageLang || '',
-          template: obj.payments.hypay.template || '',
-          tash: typeof obj.payments.hypay.tash === 'number' ? obj.payments.hypay.tash : 0,
-          fixTash: !!obj.payments.hypay.fixTash,
-          tashType: obj.payments.hypay.tashType || '',
-          hideButtons: !!obj.payments.hypay.hideButtons,
-          moreData: typeof obj.payments.hypay.moreData === 'boolean' ? obj.payments.hypay.moreData : true,
-          successUrl: obj.payments.hypay.successUrl || '',
-          failureUrl: obj.payments.hypay.failureUrl || ''
-        };
-      }
       if (obj.payments.visibility) {
         obj.payments.visibility = {
           card: !!obj.payments.visibility.card,
@@ -315,16 +284,6 @@ router.get('/', async (req, res) => {
         model: obj.translations.deepseek.model || ''
       };
     }
-    // Mask WhatsApp provider credentials if present under checkout form
-    if (obj.checkoutForm) {
-      obj.checkoutForm = { ...obj.checkoutForm };
-      if (obj.checkoutForm.metaAccessToken) obj.checkoutForm.metaAccessToken = '***';
-      if (obj.checkoutForm.metaVerifyToken) obj.checkoutForm.metaVerifyToken = '***';
-      if (obj.checkoutForm.twilioAccountSid) obj.checkoutForm.twilioAccountSid = '***';
-      if (obj.checkoutForm.twilioAuthToken) obj.checkoutForm.twilioAuthToken = '***';
-      if (obj.checkoutForm.twilioWhatsAppFrom) obj.checkoutForm.twilioWhatsAppFrom = '***';
-      if (obj.checkoutForm.twilioMessagingServiceSid) obj.checkoutForm.twilioMessagingServiceSid = '***';
-    }
     // Normalize favicon (and optionally logo) to absolute so other-origins (Netlify) can load it
     try {
   if (obj.favicon) obj.favicon = toAbsolute(req, obj.favicon);
@@ -341,6 +300,16 @@ router.get('/', async (req, res) => {
   if (obj.categoryBackgroundImage && obj.categoryBackgroundImage.startsWith('/uploads/')) obj.categoryBackgroundImage = toAbsolute(req, obj.categoryBackgroundImage);
   if (obj.visitorPopup && obj.visitorPopup.backgroundImage && obj.visitorPopup.backgroundImage.startsWith('/uploads/')) {
     obj.visitorPopup.backgroundImage = toAbsolute(req, obj.visitorPopup.backgroundImage);
+  }
+  if (obj.visitorPopup && Array.isArray(obj.visitorPopup.records)) {
+    obj.visitorPopup.records = obj.visitorPopup.records.map((record) => {
+      if (!record || typeof record !== 'object') return record;
+      const next = { ...record };
+      if (typeof next.backgroundImage === 'string' && next.backgroundImage.startsWith('/uploads/')) {
+        next.backgroundImage = toAbsolute(req, next.backgroundImage);
+      }
+      return next;
+    });
   }
   // Normalize header icon background images
   if (obj.headerIconBackgrounds) {
@@ -614,7 +583,8 @@ router.get('/inventory', async (req, res) => {
       autoIncrementOnReturn: true,
       allowNegativeStock: false,
       reserveOnCheckout: true,
-      reservationTTLMinutes: 15
+      reservationTTLMinutes: 15,
+      lowStockThreshold: 5
     };
     res.json(inv);
   } catch (error) {
@@ -635,17 +605,48 @@ router.put('/inventory', settingsWriteGuard, async (req, res) => {
       const n = Number(v);
       return Number.isFinite(n) ? n : def;
     };
-    next.autoDecrementOnOrder = coerceBool(inc.autoDecrementOnOrder, true);
-    next.autoIncrementOnCancel = coerceBool(inc.autoIncrementOnCancel, true);
-    next.autoIncrementOnReturn = coerceBool(inc.autoIncrementOnReturn, true);
-    next.allowNegativeStock = coerceBool(inc.allowNegativeStock, false);
-    next.reserveOnCheckout = coerceBool(inc.reserveOnCheckout, true);
+    next.autoDecrementOnOrder = coerceBool(inc.autoDecrementOnOrder, settings.inventory.autoDecrementOnOrder ?? true);
+    next.autoIncrementOnCancel = coerceBool(inc.autoIncrementOnCancel, settings.inventory.autoIncrementOnCancel ?? true);
+    next.autoIncrementOnReturn = coerceBool(inc.autoIncrementOnReturn, settings.inventory.autoIncrementOnReturn ?? true);
+    next.allowNegativeStock = coerceBool(inc.allowNegativeStock, settings.inventory.allowNegativeStock ?? false);
+    next.reserveOnCheckout = coerceBool(inc.reserveOnCheckout, settings.inventory.reserveOnCheckout ?? true);
     let ttl = coerceNum(inc.reservationTTLMinutes, settings.inventory.reservationTTLMinutes || 15);
     if (!(ttl >= 1 && ttl <= 1440)) ttl = 15;
     next.reservationTTLMinutes = ttl;
+    const previousLowStockThreshold = Number(settings.inventory.lowStockThreshold || 5);
+    let lowStockThreshold = coerceNum(inc.lowStockThreshold, settings.inventory.lowStockThreshold || 5);
+    if (!(lowStockThreshold >= 1 && lowStockThreshold <= 100000)) lowStockThreshold = 5;
+    next.lowStockThreshold = Math.round(lowStockThreshold);
     settings.inventory = next;
     try { settings.markModified('inventory'); } catch {}
     await settings.save();
+
+    // Keep existing inventory rows aligned with the global low-stock setting so
+    // Inventory tab status/threshold behavior matches Admin Settings exactly.
+    if (next.lowStockThreshold !== Math.round(previousLowStockThreshold)) {
+      const threshold = next.lowStockThreshold;
+      await Inventory.updateMany(
+        {},
+        [
+          {
+            $set: {
+              lowStockThreshold: threshold,
+              status: {
+                $switch: {
+                  branches: [
+                    { case: { $lte: ['$quantity', 0] }, then: 'out_of_stock' },
+                    { case: { $lte: ['$quantity', threshold] }, then: 'low_stock' }
+                  ],
+                  default: 'in_stock'
+                }
+              },
+              lastUpdated: '$$NOW'
+            }
+          }
+        ]
+      );
+    }
+
     res.json(settings.inventory);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1069,57 +1070,89 @@ router.put('/', settingsWriteGuard, async (req, res) => {
           }
           return fallback;
         };
-        const pixelBase = (() => {
-          if (typeof incoming.pixelEventBase === 'string') {
-            const cleaned = incoming.pixelEventBase.trim().slice(0, 40).replace(/[^0-9a-z_]/gi, '');
+        const sanitizePlatform = (value, fallback = 'both') => {
+          const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+          if (raw === 'web' || raw === 'mobile' || raw === 'both') return raw;
+          const fb = typeof fallback === 'string' ? fallback.trim().toLowerCase() : '';
+          if (fb === 'web' || fb === 'mobile' || fb === 'both') return fb;
+          return 'both';
+        };
+        const sanitizePixelBase = (value, fallback = 'VisitorPopup') => {
+          if (typeof value === 'string') {
+            const cleaned = value.trim().slice(0, 40).replace(/[^0-9a-z_]/gi, '');
             if (cleaned) return cleaned;
           }
-          if (typeof prev.pixelEventBase === 'string' && prev.pixelEventBase.trim()) {
-            return prev.pixelEventBase.trim();
+          if (typeof fallback === 'string') {
+            const cleanedFallback = fallback.trim().slice(0, 40).replace(/[^0-9a-z_]/gi, '');
+            if (cleanedFallback) return cleanedFallback;
           }
           return 'VisitorPopup';
-        })();
-        const couponCode = (() => {
-          const fallback = typeof prev.couponCode === 'string' ? prev.couponCode : '';
-          const next = takeString(incoming.couponCode, fallback, 80);
-          return next ? next.toUpperCase() : '';
-        })();
-        const couponNote = takeString(
-          incoming.couponNote,
-          typeof prev.couponNote === 'string' ? prev.couponNote : '* Coupon applied automatically after you finish registering.',
-          400
-        );
-        const headingColor = takeString(incoming.headingColor, prev.headingColor || '', 32);
-        const bodyColor = takeString(incoming.bodyColor, prev.bodyColor || '', 32);
-        const headingFontSize = clamp(incoming.headingFontSize, 16, 72, typeof prev.headingFontSize === 'number' ? prev.headingFontSize : 32);
-        const bodyFontSize = clamp(incoming.bodyFontSize, 12, 32, typeof prev.bodyFontSize === 'number' ? prev.bodyFontSize : 16);
-        const ctaFontSize = clamp(incoming.ctaFontSize, 12, 32, typeof prev.ctaFontSize === 'number' ? prev.ctaFontSize : 18);
-        const metaFontSize = clamp(incoming.metaFontSize, 8, 24, typeof prev.metaFontSize === 'number' ? prev.metaFontSize : 12);
+        };
+        const sanitizePopupRecord = (source, fallback = {}) => {
+          const src = (source && typeof source === 'object') ? source : {};
+          const fb = (fallback && typeof fallback === 'object') ? fallback : {};
+          const fallbackId = takeString(fb.id, 'default', 80, false);
+          const fallbackName = takeString(fb.name, 'Campaign', 80, false);
+          const recordId = takeString(src.id, fallbackId || 'default', 80, false);
+          const couponCode = (() => {
+            const next = takeString(src.couponCode, typeof fb.couponCode === 'string' ? fb.couponCode : '', 80);
+            return next ? next.toUpperCase() : '';
+          })();
+          return {
+            id: recordId,
+            name: takeString(src.name, fallbackName || 'Campaign', 80, false),
+            enabled: typeof src.enabled === 'undefined' ? !!fb.enabled : !!src.enabled,
+            fullScreenMode: typeof src.fullScreenMode === 'undefined' ? !!fb.fullScreenMode : !!src.fullScreenMode,
+            platform: sanitizePlatform(src.platform, fb.platform || 'both'),
+            showOnScroll: typeof src.showOnScroll === 'undefined' ? (typeof fb.showOnScroll === 'boolean' ? fb.showOnScroll : true) : !!src.showOnScroll,
+            showExitIntent: typeof src.showExitIntent === 'undefined' ? (typeof fb.showExitIntent === 'boolean' ? fb.showExitIntent : true) : !!src.showExitIntent,
+            frequencyDays: Math.round(clamp(src.frequencyDays, 1, 30, typeof fb.frequencyDays === 'number' ? fb.frequencyDays : 7)),
+            scrollThreshold: Math.round(clamp(src.scrollThreshold, 0, 4000, typeof fb.scrollThreshold === 'number' ? fb.scrollThreshold : 360)),
+            heading: takeString(src.heading, fb.heading || 'Register & get 10% OFF', 160, false),
+            bodyAr: takeString(src.bodyAr, typeof fb.bodyAr === 'string' ? fb.bodyAr : '', 400),
+            bodyHe: takeString(src.bodyHe, typeof fb.bodyHe === 'string' ? fb.bodyHe : '', 400),
+            bodyEn: takeString(src.bodyEn, typeof fb.bodyEn === 'string' ? fb.bodyEn : '', 400),
+            ctaLabel: takeString(src.ctaLabel, fb.ctaLabel || 'Register now', 80, false),
+            ctaHref: takeString(src.ctaHref, fb.ctaHref || '/register', 400, false),
+            couponCode,
+            couponNote: takeString(src.couponNote, typeof fb.couponNote === 'string' ? fb.couponNote : '* Coupon applied automatically after you finish registering.', 400),
+            pixelEventBase: sanitizePixelBase(src.pixelEventBase, fb.pixelEventBase || 'VisitorPopup'),
+            accentColor: takeString(src.accentColor, fb.accentColor || '', 32),
+            textColor: takeString(src.textColor, fb.textColor || '', 32),
+            backgroundColor: takeString(src.backgroundColor, fb.backgroundColor || '', 32),
+            backgroundImage: takeString(src.backgroundImage, fb.backgroundImage || '', 1000),
+            headingColor: takeString(src.headingColor, fb.headingColor || '', 32),
+            bodyColor: takeString(src.bodyColor, fb.bodyColor || '', 32),
+            headingFontSize: Math.round(clamp(src.headingFontSize, 16, 72, typeof fb.headingFontSize === 'number' ? fb.headingFontSize : 32)),
+            bodyFontSize: Math.round(clamp(src.bodyFontSize, 12, 32, typeof fb.bodyFontSize === 'number' ? fb.bodyFontSize : 16)),
+            ctaFontSize: Math.round(clamp(src.ctaFontSize, 12, 32, typeof fb.ctaFontSize === 'number' ? fb.ctaFontSize : 18)),
+            metaFontSize: Math.round(clamp(src.metaFontSize, 8, 24, typeof fb.metaFontSize === 'number' ? fb.metaFontSize : 12))
+          };
+        };
+        const fallbackRecord = sanitizePopupRecord({
+          ...prev,
+          id: prev.activeRecordId || prev.id || 'default',
+          name: prev.activeRecordName || prev.name || 'Default Campaign'
+        });
+        const incomingRecords = Array.isArray(incoming.records) ? incoming.records.slice(0, 50) : [];
+        const prevRecords = Array.isArray(prev.records) ? prev.records : [];
+        let records = incomingRecords
+          .map((record, index) => sanitizePopupRecord(record, prevRecords[index] || fallbackRecord))
+          .filter((record, index, arr) => record.id && arr.findIndex((r) => r.id === record.id) === index);
+        if (!records.length) {
+          records = [sanitizePopupRecord({
+            ...incoming,
+            id: incoming.id || prev.activeRecordId || prev.id || 'default',
+            name: incoming.name || prev.activeRecordName || prev.name || 'Default Campaign'
+          }, fallbackRecord)];
+        }
+        const requestedActiveId = takeString(incoming.activeRecordId, takeString(prev.activeRecordId, records[0]?.id || 'default', 80, false), 80, false);
+        const activeRecord = records.find((record) => record.id === requestedActiveId) || records[0];
         settings.visitorPopup = {
-          enabled: typeof incoming.enabled === 'undefined' ? !!prev.enabled : !!incoming.enabled,
-          showOnScroll: typeof incoming.showOnScroll === 'undefined' ? (typeof prev.showOnScroll === 'boolean' ? prev.showOnScroll : true) : !!incoming.showOnScroll,
-          showExitIntent: typeof incoming.showExitIntent === 'undefined' ? (typeof prev.showExitIntent === 'boolean' ? prev.showExitIntent : true) : !!incoming.showExitIntent,
-          frequencyDays: Math.round(clamp(incoming.frequencyDays, 1, 30, typeof prev.frequencyDays === 'number' ? prev.frequencyDays : 7)),
-          scrollThreshold: Math.round(clamp(incoming.scrollThreshold, 0, 4000, typeof prev.scrollThreshold === 'number' ? prev.scrollThreshold : 360)),
-          heading: takeString(incoming.heading, prev.heading || 'Register & get 10% OFF', 160, false),
-          bodyAr: takeString(incoming.bodyAr, typeof prev.bodyAr === 'string' ? prev.bodyAr : '', 400),
-          bodyHe: takeString(incoming.bodyHe, typeof prev.bodyHe === 'string' ? prev.bodyHe : '', 400),
-          bodyEn: takeString(incoming.bodyEn, typeof prev.bodyEn === 'string' ? prev.bodyEn : '', 400),
-          ctaLabel: takeString(incoming.ctaLabel, prev.ctaLabel || 'Register now', 80, false),
-          ctaHref: takeString(incoming.ctaHref, prev.ctaHref || '/register', 400, false),
-          couponCode,
-          couponNote,
-          pixelEventBase: pixelBase,
-          accentColor: takeString(incoming.accentColor, prev.accentColor || '', 32),
-          textColor: takeString(incoming.textColor, prev.textColor || '', 32),
-          backgroundColor: takeString(incoming.backgroundColor, prev.backgroundColor || '', 32),
-          backgroundImage: takeString(incoming.backgroundImage, prev.backgroundImage || '', 1000),
-          headingColor,
-          bodyColor,
-          headingFontSize: Math.round(headingFontSize),
-          bodyFontSize: Math.round(bodyFontSize),
-          ctaFontSize: Math.round(ctaFontSize),
-          metaFontSize: Math.round(metaFontSize)
+          ...activeRecord,
+          activeRecordId: activeRecord.id,
+          activeRecordName: activeRecord.name,
+          records
         };
         try { settings.markModified('visitorPopup'); } catch {}
       }
@@ -1170,9 +1203,6 @@ router.put('/', settingsWriteGuard, async (req, res) => {
         try { settings.markModified('mobileHomeHeader'); } catch {}
       }
       // Simple boolean toggles
-      if (Object.prototype.hasOwnProperty.call(req.body, 'showFilterBar')) {
-        settings.showFilterBar = !!req.body.showFilterBar;
-      }
       if (Object.prototype.hasOwnProperty.call(req.body, 'showColorFilter')) {
         settings.showColorFilter = !!req.body.showColorFilter;
       }
@@ -1225,7 +1255,6 @@ router.put('/', settingsWriteGuard, async (req, res) => {
             navPanelColumnActiveBgColor: settings.navPanelColumnActiveBgColor,
             navPanelAccentColor: settings.navPanelAccentColor,
             navPanelHeaderColor: settings.navPanelHeaderColor,
-            navLinksInlineWhenNoCategory: settings.navLinksInlineWhenNoCategory,
             fontFamily: settings.fontFamily,
             borderRadius: settings.borderRadius,
             buttonStyle: settings.buttonStyle,
@@ -1253,7 +1282,6 @@ router.put('/', settingsWriteGuard, async (req, res) => {
             footerStyle: settings.footerStyle,
             productCardStyle: settings.productCardStyle,
             productGridStyle: settings.productGridStyle,
-            showFilterBar: settings.showFilterBar,
             showColorFilter: settings.showColorFilter,
             // Component behavior
             heroAutoplayMs: settings.heroAutoplayMs,
@@ -1262,7 +1290,6 @@ router.put('/', settingsWriteGuard, async (req, res) => {
             scrollTopTextColor: settings.scrollTopTextColor,
             scrollTopHoverBgColor: settings.scrollTopHoverBgColor,
             scrollTopPingColor: settings.scrollTopPingColor,
-            scrollTopBackgroundImage: settings.scrollTopBackgroundImage ? toAbsolute(req, settings.scrollTopBackgroundImage) : settings.scrollTopBackgroundImage,
             // Accessibility feature toggles
             a11y: settings.a11y,
             // SEO fields
@@ -1319,7 +1346,6 @@ router.put('/', settingsWriteGuard, async (req, res) => {
   if (savedObj.headerBackgroundImage && savedObj.headerBackgroundImage.startsWith('/uploads/')) savedObj.headerBackgroundImage = toAbsolute(req, savedObj.headerBackgroundImage);
   if (savedObj.navBackgroundImage && savedObj.navBackgroundImage.startsWith('/uploads/')) savedObj.navBackgroundImage = toAbsolute(req, savedObj.navBackgroundImage);
     if (savedObj.announcementsBackgroundImage && savedObj.announcementsBackgroundImage.startsWith('/uploads/')) savedObj.announcementsBackgroundImage = toAbsolute(req, savedObj.announcementsBackgroundImage);
-        if (savedObj.scrollTopBackgroundImage && savedObj.scrollTopBackgroundImage.startsWith('/uploads/')) savedObj.scrollTopBackgroundImage = toAbsolute(req, savedObj.scrollTopBackgroundImage);
       if (savedObj.storeBackgroundImage && savedObj.storeBackgroundImage.startsWith('/uploads/')) savedObj.storeBackgroundImage = toAbsolute(req, savedObj.storeBackgroundImage);
       if (savedObj.productDetailBackgroundImage && savedObj.productDetailBackgroundImage.startsWith('/uploads/')) savedObj.productDetailBackgroundImage = toAbsolute(req, savedObj.productDetailBackgroundImage);
       if (savedObj.productCardBackgroundImage && savedObj.productCardBackgroundImage.startsWith('/uploads/')) savedObj.productCardBackgroundImage = toAbsolute(req, savedObj.productCardBackgroundImage);
@@ -1988,68 +2014,6 @@ router.post('/upload/announcements-background', adminAuth, upload.single('file')
   }
 });
 
-// Upload scroll-to-top background image (admin only)
-router.post('/upload/scroll-top-background', adminAuth, upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'No file uploaded' });
-    }
-
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-
-    let finalUrl = `/uploads/${req.file.filename}`;
-    const hasCloudinaryCreds = await hasCloudinaryCredentials();
-    if (hasCloudinaryCreds) {
-      try {
-        await ensureCloudinaryConfig();
-        const uploadResult = await cloudinary.uploader.upload(path.join(uploadDir, req.file.filename), {
-          folder: 'settings/scroll-top',
-          resource_type: 'image',
-          use_filename: true,
-          unique_filename: false,
-          overwrite: true
-        });
-        if (uploadResult?.secure_url) {
-          finalUrl = uploadResult.secure_url;
-          try { fs.unlinkSync(path.join(uploadDir, req.file.filename)); } catch {}
-        }
-      } catch (cloudErr) {
-        console.warn('[scroll-top-background] Cloudinary upload failed, keeping local file:', cloudErr.message);
-      }
-    }
-
-    // Inline when no Cloudinary to persist across ephemeral storage
-    if (!hasCloudinaryCreds) {
-      try {
-        const filePath = path.join(uploadDir, req.file.filename);
-        const buf = fs.readFileSync(filePath);
-        const b64 = buf.toString('base64');
-        const mime = req.file.mimetype || 'image/png';
-        finalUrl = `data:${mime};base64,${b64}`;
-        try { fs.unlinkSync(filePath); } catch {}
-      } catch (inlineErr) {
-        console.warn('[scroll-top-background] Failed to inline image, using relative path:', inlineErr.message);
-      }
-    }
-
-    settings.scrollTopBackgroundImage = finalUrl;
-    await settings.save();
-
-    // Broadcast minimal update
-    try {
-      const broadcast = req.app.get('broadcastToClients');
-      if (typeof broadcast === 'function') {
-        broadcast({ type: 'settings_updated', data: { scrollTopBackgroundImage: toAbsolute(req, finalUrl) } });
-      }
-    } catch {}
-
-    res.json({ url: toAbsolute(req, finalUrl), stored: hasCloudinaryCreds ? 'cloudinary' : 'inline' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
 // Upload global store background image (admin only)
 router.post('/upload/store-background', adminAuth, upload.single('file'), async (req, res) => {
   try {
@@ -2350,19 +2314,12 @@ router.get('/checkout', async (req, res) => {
       ? cityTable.map(canonicalCityValue).filter(Boolean)
       : (Array.isArray(cf.cities) ? cf.cities.filter(c => typeof c === 'string' && c.trim()).map(c => c.trim()) : []);
     res.json({
-      showFirstName: cf.showFirstName !== false,
       showEmail: !!cf.showEmail,
       showLastName: !!cf.showLastName,
-      showMobile: cf.showMobile !== false,
       allowGuestCheckout: cf.allowGuestCheckout !== false, // default true
       showSecondaryMobile: !!cf.showSecondaryMobile,
-      showAddress: cf.showAddress !== false,
-      showCity: cf.showCity !== false,
       showCountry: !!cf.showCountry,
       allowOtherCity: !!cf.allowOtherCity,
-      reminderMessageTemplate: typeof cf.reminderMessageTemplate === 'string' ? cf.reminderMessageTemplate : '',
-      reminderCheckoutUrl: typeof cf.reminderCheckoutUrl === 'string' ? cf.reminderCheckoutUrl : '',
-      reminderDiscountCode: typeof cf.reminderDiscountCode === 'string' ? cf.reminderDiscountCode : '',
       cities: cityList,
       cityTable
     });
@@ -2374,23 +2331,16 @@ router.get('/checkout', async (req, res) => {
 // Update checkout form (guarded; can be relaxed via env)
 router.put('/checkout', settingsWriteGuard, async (req, res) => {
   try {
-    const { showFirstName, showEmail, showLastName, showMobile, showSecondaryMobile, showAddress, showCity, showCountry, cities, allowOtherCity, allowGuestCheckout, cityTable, reminderMessageTemplate, reminderCheckoutUrl, reminderDiscountCode } = req.body || {};
+    const { showEmail, showLastName, showSecondaryMobile, showCountry, cities, allowOtherCity, allowGuestCheckout, cityTable } = req.body || {};
     let settings = await Settings.findOne();
     if (!settings) settings = new Settings();
     settings.checkoutForm = settings.checkoutForm || {};
-    if (typeof showFirstName === 'boolean') settings.checkoutForm.showFirstName = showFirstName;
     if (typeof showEmail === 'boolean') settings.checkoutForm.showEmail = showEmail;
     if (typeof showLastName === 'boolean') settings.checkoutForm.showLastName = showLastName;
-    if (typeof showMobile === 'boolean') settings.checkoutForm.showMobile = showMobile;
     if (typeof showSecondaryMobile === 'boolean') settings.checkoutForm.showSecondaryMobile = showSecondaryMobile;
-    if (typeof showAddress === 'boolean') settings.checkoutForm.showAddress = showAddress;
-    if (typeof showCity === 'boolean') settings.checkoutForm.showCity = showCity;
     if (typeof showCountry === 'boolean') settings.checkoutForm.showCountry = showCountry;
-    if (typeof allowGuestCheckout === 'boolean') settings.checkoutForm.allowGuestCheckout = allowGuestCheckout;
+  if (typeof allowGuestCheckout === 'boolean') settings.checkoutForm.allowGuestCheckout = allowGuestCheckout;
     if (typeof allowOtherCity === 'boolean') settings.checkoutForm.allowOtherCity = allowOtherCity;
-    if (typeof reminderMessageTemplate === 'string') settings.checkoutForm.reminderMessageTemplate = reminderMessageTemplate;
-    if (typeof reminderCheckoutUrl === 'string') settings.checkoutForm.reminderCheckoutUrl = reminderCheckoutUrl;
-    if (typeof reminderDiscountCode === 'string') settings.checkoutForm.reminderDiscountCode = reminderDiscountCode;
     if (Array.isArray(cityTable)) {
       const normalized = cityTable
         .map(entry => normalizeCityRow(entry))
@@ -2400,64 +2350,9 @@ router.put('/checkout', settingsWriteGuard, async (req, res) => {
     } else if (Array.isArray(cities)) {
       const clean = cities.filter(c => typeof c === 'string' && c.trim().length).map(c => c.trim());
       settings.checkoutForm.cities = clean;
-      // Always sync cityTable so that an empty cities array clears it too
-      settings.checkoutForm.cityTable = clean.map(label => ({ ar: label, en: '', he: '' }));
-    }
-    settings.markModified('checkoutForm');
-    await settings.save();
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
-});
-
-// Checkout WhatsApp reminder delivery (Meta Cloud API) - admin only
-router.get('/checkout/whatsapp', adminAuth, async (req, res) => {
-  try {
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-    const cf = settings.checkoutForm || {};
-    const envEnabled = String(process.env.META_WHATSAPP_ENABLED || '').trim() === '1';
-    const envAccessToken = process.env.META_WHATSAPP_ACCESS_TOKEN || '';
-    const envPhoneNumberId = process.env.META_WHATSAPP_PHONE_NUMBER_ID || '';
-    const envVerifyToken = process.env.META_WHATSAPP_VERIFY_TOKEN || '';
-    const envTemplateName = process.env.META_WHATSAPP_TEMPLATE_NAME || '';
-    const envTemplateLanguage = process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || 'he';
-    res.json({
-      reminderWhatsAppEnabled: envEnabled || !!cf.reminderWhatsAppEnabled,
-      metaPhoneNumberId: cf.metaPhoneNumberId || envPhoneNumberId,
-      metaAccessToken: (cf.metaAccessToken || envAccessToken) ? '***' : '',
-      metaVerifyToken: (cf.metaVerifyToken || envVerifyToken) ? '***' : '',
-      metaTemplateName: cf.metaTemplateName || envTemplateName,
-      metaTemplateLanguage: cf.metaTemplateLanguage || envTemplateLanguage
-    });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
-});
-
-router.put('/checkout/whatsapp', adminAuth, async (req, res) => {
-  try {
-    const {
-      reminderWhatsAppEnabled,
-      metaAccessToken,
-      metaPhoneNumberId,
-      metaVerifyToken,
-      metaTemplateName,
-      metaTemplateLanguage
-    } = req.body || {};
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-    settings.checkoutForm = settings.checkoutForm || {};
-    if (typeof reminderWhatsAppEnabled === 'boolean') settings.checkoutForm.reminderWhatsAppEnabled = reminderWhatsAppEnabled;
-    if (typeof metaPhoneNumberId === 'string') settings.checkoutForm.metaPhoneNumberId = metaPhoneNumberId.trim();
-    if (typeof metaTemplateName === 'string') settings.checkoutForm.metaTemplateName = metaTemplateName.trim();
-    if (typeof metaTemplateLanguage === 'string') settings.checkoutForm.metaTemplateLanguage = metaTemplateLanguage.trim() || 'he';
-    if (typeof metaAccessToken === 'string') {
-      if (metaAccessToken !== '***') settings.checkoutForm.metaAccessToken = metaAccessToken.trim();
-    }
-    if (typeof metaVerifyToken === 'string') {
-      if (metaVerifyToken !== '***') settings.checkoutForm.metaVerifyToken = metaVerifyToken.trim();
+      if (!Array.isArray(settings.checkoutForm.cityTable) || !settings.checkoutForm.cityTable.length) {
+        settings.checkoutForm.cityTable = clean.map(label => ({ ar: label, en: '', he: '' }));
+      }
     }
     settings.markModified('checkoutForm');
     await settings.save();
@@ -2477,7 +2372,7 @@ router.post('/payments/paypal/test', adminAuth, async (req, res) => {
     // Simple auth test: get an access token via SDK by creating a minimal order and not executing
     const { getPayPalClient, paypalSdk } = await import('../services/paypalClient.js');
     try {
-      const client = await getPayPalClient();
+      const client = getPayPalClient();
       const request = new paypalSdk.orders.OrdersCreateRequest();
       request.prefer('return=representation');
       request.requestBody({ intent: 'CAPTURE', purchase_units: [{ amount: { currency_code: 'USD', value: '1.00' } }] });
@@ -2569,143 +2464,6 @@ router.post('/payments/icredit/test', adminAuth, async (req, res) => {
     if (!c.apiUrl) return res.status(400).json({ ok: false, message: 'Missing API URL' });
     if (!c.groupPrivateToken) return res.status(400).json({ ok: false, message: 'Missing GroupPrivateToken' });
     // We don't call the remote API here to avoid network dependency; this endpoint checks local config only.
-    return res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
-  }
-});
-
-// Meshulam (Grow) Light API config endpoints
-router.get('/payments/meshulam', async (req, res) => {
-  try {
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-    const m = (settings.payments && settings.payments.meshulam) || {};
-    return res.json({
-      enabled: !!m.enabled,
-      apiUrl: m.apiUrl || 'https://sandbox.meshulam.co.il/api/light/server/1.0/createPaymentProcess',
-      approveUrl: m.approveUrl || 'https://sandbox.meshulam.co.il/api/light/server/1.0/approveTransaction',
-      pageType: m.pageType || '',
-      pageCode: m.pageCode || '',
-      userId: m.userId || '',
-      apiKey: m.apiKey ? '***' : '',
-      successUrl: m.successUrl || '',
-      cancelUrl: m.cancelUrl || '',
-      notifyUrl: m.notifyUrl || ''
-    });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
-});
-
-router.put('/payments/meshulam', adminAuth, async (req, res) => {
-  try {
-    const inc = req.body || {};
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-    settings.payments = settings.payments || {};
-    settings.payments.meshulam = settings.payments.meshulam || {};
-    const prevKey = settings.payments.meshulam.apiKey || '';
-    if (typeof inc.enabled !== 'undefined') settings.payments.meshulam.enabled = !!inc.enabled;
-    if (typeof inc.apiUrl === 'string') settings.payments.meshulam.apiUrl = inc.apiUrl.trim();
-    if (typeof inc.approveUrl === 'string') settings.payments.meshulam.approveUrl = inc.approveUrl.trim();
-    if (typeof inc.pageType === 'string') settings.payments.meshulam.pageType = inc.pageType.trim();
-    if (typeof inc.pageCode === 'string') settings.payments.meshulam.pageCode = inc.pageCode.trim();
-    if (typeof inc.userId === 'string') settings.payments.meshulam.userId = inc.userId.trim();
-    if (typeof inc.apiKey === 'string') settings.payments.meshulam.apiKey = inc.apiKey === '***' ? prevKey : inc.apiKey.trim();
-    if (typeof inc.successUrl === 'string') settings.payments.meshulam.successUrl = inc.successUrl.trim();
-    if (typeof inc.cancelUrl === 'string') settings.payments.meshulam.cancelUrl = inc.cancelUrl.trim();
-    if (typeof inc.notifyUrl === 'string') settings.payments.meshulam.notifyUrl = inc.notifyUrl.trim();
-    try { settings.markModified('payments'); } catch {}
-    await settings.save();
-    return res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
-});
-
-// Hypay (APISign) config endpoints
-router.get('/payments/hypay', async (req, res) => {
-  try {
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-    const h = (settings.payments && settings.payments.hypay) || {};
-    return res.json({
-      enabled: !!h.enabled,
-      masof: h.masof || '',
-      apiKey: h.apiKey ? '***' : '',
-      passp: h.passp ? '***' : '',
-      info: h.info || 'Online order',
-      pageLang: h.pageLang || '',
-      template: h.template || '',
-      tash: typeof h.tash === 'number' ? h.tash : 0,
-      fixTash: !!h.fixTash,
-      tashType: h.tashType || '',
-      hideButtons: !!h.hideButtons,
-      moreData: typeof h.moreData === 'boolean' ? h.moreData : true,
-      successUrl: h.successUrl || '',
-      failureUrl: h.failureUrl || ''
-    });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
-});
-
-router.put('/payments/hypay', adminAuth, async (req, res) => {
-  try {
-    const inc = req.body || {};
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-    settings.payments = settings.payments || {};
-    settings.payments.hypay = settings.payments.hypay || {};
-    const prevApiKey = settings.payments.hypay.apiKey || '';
-    const prevPassp = settings.payments.hypay.passp || '';
-    if (typeof inc.enabled !== 'undefined') settings.payments.hypay.enabled = !!inc.enabled;
-    if (typeof inc.masof === 'string') settings.payments.hypay.masof = inc.masof.trim();
-    if (typeof inc.apiKey === 'string') settings.payments.hypay.apiKey = inc.apiKey === '***' ? prevApiKey : inc.apiKey.trim();
-    if (typeof inc.passp === 'string') settings.payments.hypay.passp = inc.passp === '***' ? prevPassp : inc.passp.trim();
-    if (typeof inc.info === 'string') settings.payments.hypay.info = inc.info.trim();
-    if (typeof inc.pageLang === 'string') settings.payments.hypay.pageLang = inc.pageLang.trim();
-    if (typeof inc.template === 'string') settings.payments.hypay.template = inc.template.trim();
-    if (typeof inc.tash !== 'undefined') settings.payments.hypay.tash = Number.isFinite(Number(inc.tash)) && Number(inc.tash) > 0 ? Number(inc.tash) : 0;
-    if (typeof inc.fixTash !== 'undefined') settings.payments.hypay.fixTash = !!inc.fixTash;
-    if (typeof inc.tashType === 'string') settings.payments.hypay.tashType = inc.tashType.trim();
-    if (typeof inc.hideButtons !== 'undefined') settings.payments.hypay.hideButtons = !!inc.hideButtons;
-    if (typeof inc.moreData !== 'undefined') settings.payments.hypay.moreData = !!inc.moreData;
-    if (typeof inc.successUrl === 'string') settings.payments.hypay.successUrl = inc.successUrl.trim();
-    if (typeof inc.failureUrl === 'string') settings.payments.hypay.failureUrl = inc.failureUrl.trim();
-    try { settings.markModified('payments'); } catch {}
-    await settings.save();
-    return res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ message: e.message });
-  }
-});
-
-router.post('/payments/hypay/test', adminAuth, async (req, res) => {
-  try {
-    let settings = await Settings.findOne();
-    if (!settings) settings = new Settings();
-    const h = (settings.payments && settings.payments.hypay) || {};
-    if (!h.enabled) return res.status(400).json({ ok: false, message: 'Hypay is disabled' });
-    if (!h.masof) return res.status(400).json({ ok: false, message: 'Missing Masof' });
-    if (!h.apiKey) return res.status(400).json({ ok: false, message: 'Missing API key' });
-    if (!h.passp) return res.status(400).json({ ok: false, message: 'Missing PassP' });
-    return res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
-  }
-});
-
-router.post('/payments/meshulam/test', adminAuth, async (req, res) => {
-  try {
-    let settings = await Settings.findOne();
-    const m = settings?.payments?.meshulam || {};
-    if (!m.enabled) return res.status(400).json({ ok: false, message: 'Meshulam is disabled' });
-    if (!m.apiUrl) return res.status(400).json({ ok: false, message: 'Missing create API URL' });
-    if (!m.approveUrl) return res.status(400).json({ ok: false, message: 'Missing approve API URL' });
-    if (!m.pageCode) return res.status(400).json({ ok: false, message: 'Missing pageCode' });
-    if (!m.userId) return res.status(400).json({ ok: false, message: 'Missing userId' });
     return res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, message: e.message });

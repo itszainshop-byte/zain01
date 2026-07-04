@@ -12,7 +12,18 @@ const router = express.Router();
 // Update user profile
 router.patch('/profile', auth, async (req, res) => {
   try {
-    const { name, email, image } = req.body;
+    const {
+      name,
+      email,
+      image,
+      phoneNumber,
+      addressLine1,
+      addressLine2,
+      city,
+      state,
+      postalCode,
+      country
+    } = req.body;
     const user = await User.findById(req.user._id);
 
     if (!user) {
@@ -27,10 +38,25 @@ router.patch('/profile', auth, async (req, res) => {
       }
     }
 
+    const normalizedPhone = typeof phoneNumber === 'string' ? phoneNumber.trim() : phoneNumber;
+    if (typeof normalizedPhone === 'string' && normalizedPhone) {
+      const existingPhoneUser = await User.findOne({ phoneNumber: normalizedPhone, _id: { $ne: user._id } });
+      if (existingPhoneUser) {
+        return res.status(400).json({ message: 'Phone number already in use' });
+      }
+    }
+
     // Update fields
     if (name) user.name = name;
     if (email) user.email = email;
     if (image) user.image = image;
+    if (phoneNumber !== undefined) user.phoneNumber = normalizedPhone || undefined;
+    if (addressLine1 !== undefined) user.addressLine1 = String(addressLine1 || '').trim();
+    if (addressLine2 !== undefined) user.addressLine2 = String(addressLine2 || '').trim();
+    if (city !== undefined) user.city = String(city || '').trim();
+    if (state !== undefined) user.state = String(state || '').trim();
+    if (postalCode !== undefined) user.postalCode = String(postalCode || '').trim();
+    if (country !== undefined) user.country = String(country || '').trim();
 
     await user.save();
 
@@ -39,7 +65,14 @@ router.patch('/profile', auth, async (req, res) => {
         id: user._id,
         name: user.name,
         email: user.email,
-        image: user.image
+        image: user.image,
+        phoneNumber: user.phoneNumber || '',
+        addressLine1: user.addressLine1 || '',
+        addressLine2: user.addressLine2 || '',
+        city: user.city || '',
+        state: user.state || '',
+        postalCode: user.postalCode || '',
+        country: user.country || ''
       }
     });
   } catch (error) {
@@ -51,21 +84,34 @@ router.patch('/profile', auth, async (req, res) => {
 // Update password
 router.patch('/password', auth, async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const currentPasswordRaw = String(req.body.currentPassword || '');
+    const newPasswordRaw = String(req.body.newPassword || '');
+    const currentPasswordTrimmed = currentPasswordRaw.trim();
+    const newPasswordTrimmed = newPasswordRaw.trim();
+
+    if (!currentPasswordTrimmed || !newPasswordTrimmed) {
+      return res.status(400).json({ message: 'Both current and new password are required' });
+    }
+    if (newPasswordTrimmed.length < 6) {
+      return res.status(400).json({ message: 'New password must be at least 6 characters' });
+    }
     const user = await User.findById(req.user._id);
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Verify current password
-    const isMatch = await user.comparePassword(currentPassword);
+    // Verify current password (accepting accidental leading/trailing spaces)
+    let isMatch = await user.comparePassword(currentPasswordRaw);
+    if (!isMatch && currentPasswordTrimmed !== currentPasswordRaw) {
+      isMatch = await user.comparePassword(currentPasswordTrimmed);
+    }
     if (!isMatch) {
       return res.status(400).json({ message: 'Current password is incorrect' });
     }
 
     // Update password
-    user.password = newPassword;
+    user.password = newPasswordTrimmed;
     await user.save();
 
     res.json({ message: 'Password updated successfully' });
@@ -194,6 +240,7 @@ router.get('/', adminAuth, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
     const search = (req.query.search || '').trim();
     const role = (req.query.role || '').trim();
+    const productName = (req.query.productName || '').trim();
     const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
     const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
   const minOrders = req.query.minOrders ? parseInt(req.query.minOrders) : null;
@@ -214,6 +261,36 @@ router.get('/', adminAuth, async (req, res) => {
     if (role) {
       baseMatch.role = role;
     }
+    // Filter by product purchased: find user IDs from orders containing the product name
+    if (productName) {
+      const matchingOrders = await Order.find(
+        { 'items.name': { $regex: productName, $options: 'i' } },
+        { user: 1, 'customerInfo.email': 1 }
+      ).lean();
+      const userObjectIds = matchingOrders
+        .map(o => o.user)
+        .filter(id => id && mongoose.Types.ObjectId.isValid(id));
+      // Also collect emails for guest orders
+      const guestEmails = matchingOrders
+        .map(o => o.customerInfo?.email)
+        .filter(Boolean)
+        .map(e => e.toLowerCase());
+      const userIdSet = Array.from(new Set(userObjectIds.map(id => id.toString())));
+      const emailSet = Array.from(new Set(guestEmails));
+      const productFilter = [];
+      if (userIdSet.length) productFilter.push({ _id: { $in: userIdSet.map(id => new mongoose.Types.ObjectId(id)) } });
+      if (emailSet.length) productFilter.push({ email: { $in: emailSet.map(e => new RegExp(`^${e}$`, 'i')) } });
+      if (!productFilter.length) {
+        // No orders found for this product — return empty result fast
+        return res.json({ users: [], page: 1, totalPages: 0, total: 0 });
+      }
+      if (baseMatch.$or) {
+        baseMatch.$and = [{ $or: baseMatch.$or }, { $or: productFilter }];
+        delete baseMatch.$or;
+      } else {
+        baseMatch.$or = productFilter;
+      }
+    }
     if (startDate || endDate) {
       baseMatch.createdAt = {};
       if (startDate) baseMatch.createdAt.$gte = startDate;
@@ -231,9 +308,12 @@ router.get('/', adminAuth, async (req, res) => {
     const statsLookup = {
       $lookup: {
         from: 'orders',
-        let: { userId: '$_id' },
+        let: { userId: '$_id', userEmail: { $toLower: '$email' } },
         pipeline: [
-          { $match: { $expr: { $eq: ['$user', '$$userId'] } } },
+          { $match: { $expr: { $or: [
+            { $eq: ['$user', '$$userId'] },
+            { $eq: [{ $toLower: '$customerInfo.email' }, '$$userEmail'] }
+          ] } } },
           { $group: { _id: null, count: { $sum: 1 }, totalSpent: { $sum: '$totalAmount' }, lastOrder: { $max: '$createdAt' } } }
         ],
         as: 'orderStats'
@@ -502,12 +582,33 @@ router.get('/stats/summary', adminAuth, async (req, res) => {
   }
 });
 
+// Admin: bulk delete users  — must be BEFORE /:id routes
+router.delete('/bulk', adminAuth, async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ message: 'userIds array required' });
+    }
+    // Prevent self-deletion
+    const filteredIds = userIds.filter(id => id !== req.user._id.toString());
+    const result = await User.deleteMany({ _id: { $in: filteredIds } });
+    res.json({ message: 'Users deleted', deletedCount: result.deletedCount });
+  } catch (error) {
+    console.error('Error bulk deleting users:', error);
+    res.status(500).json({ message: 'Failed to bulk delete users' });
+  }
+});
+
 // Admin: get specific user's recent orders
 router.get('/:id/orders', adminAuth, async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 10, 50);
     const userId = req.params.id;
-    const orders = await Order.find({ user: userId })
+    const u = await User.findById(userId).select('email').lean();
+    const query = u?.email
+      ? { $or: [{ user: userId }, { 'customerInfo.email': new RegExp(`^${u.email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }] }
+      : { user: userId };
+    const orders = await Order.find(query)
       .sort({ createdAt: -1 })
       .limit(limit)
       .select('orderNumber totalAmount currency status paymentStatus createdAt items');

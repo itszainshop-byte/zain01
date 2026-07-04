@@ -7,12 +7,6 @@ export const errorHandler = (err, req, res, next) => {
   let statusCode = err.statusCode || StatusCodes.INTERNAL_SERVER_ERROR;
   let message = err.message || 'Internal Server Error';
 
-  // Malformed JSON request bodies from express.json/body-parser
-  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
-    statusCode = StatusCodes.BAD_REQUEST;
-    message = 'Malformed JSON body. Send valid JSON, for example {"status":"processing"}.';
-  }
-
   // Mongoose validation error
   if (err.name === 'ValidationError') {
     statusCode = StatusCodes.BAD_REQUEST;
@@ -58,7 +52,7 @@ export const errorHandler = (err, req, res, next) => {
     }
     // Common headers browsers may allow on error payloads
     if (!res.getHeader('Access-Control-Allow-Headers')) {
-      res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+      res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Accept-Language, Authorization, X-Client-Type, X-Client-Platform, X-Refresh-Token');
     }
     if (!res.getHeader('Access-Control-Allow-Methods')) {
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');

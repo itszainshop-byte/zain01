@@ -47,7 +47,7 @@ export const adminAuth = async (req, res, next) => {
   try {
     await auth(req, res, () => {
       console.log('User role check:', req.user?.role);
-      if (req.user?.role !== 'admin') {
+      if (!['admin', 'super_admin'].includes(req.user?.role)) {
         console.log('User is not admin, rejecting request');
         return res.status(403).json({ 
           message: 'Admin access required' 
@@ -60,6 +60,24 @@ export const adminAuth = async (req, res, next) => {
     console.error('Admin auth error:', error);
     res.status(403).json({ 
       message: 'Admin access required' 
+    });
+  }
+};
+
+export const superAdminAuth = async (req, res, next) => {
+  try {
+    await auth(req, res, () => {
+      if (req.user?.role !== 'super_admin') {
+        return res.status(403).json({
+          message: 'Super-admin access required'
+        });
+      }
+      next();
+    });
+  } catch (error) {
+    console.error('Super-admin auth error:', error);
+    res.status(403).json({
+      message: 'Super-admin access required'
     });
   }
 };
