@@ -26,10 +26,10 @@ COPY . /tmp/context
 # Detect app directory, copy into /app/project, then install production deps
 RUN set -eux; \
 		SRC=/tmp/context; \
-		if [ -f "$SRC/project/package.json" ]; then \
-			APP_DIR="$SRC/project"; \
-		elif [ -f "$SRC/package.json" ]; then \
+		if [ -f "$SRC/package.json" ]; then \
 			APP_DIR="$SRC"; \
+		elif [ -f "$SRC/project/package.json" ]; then \
+			APP_DIR="$SRC/project"; \
 		else \
 			echo "[error] Could not find package.json in build context or project/ subfolder"; \
 			ls -la "$SRC" || true; \
