@@ -377,6 +377,16 @@ const PORT = process.env.PORT || 8080;
 
 // Create HTTP server
 const server = createServer(app);
+let serverListening = false;
+
+function ensureServerListening() {
+  if (serverListening) return;
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
+  });
+  serverListening = true;
+}
 
 // WebSocket setup (explicit upgrade handling for stability behind proxies)
 // We handle upgrades only for /ws (primary) and /api/ws (fallback when proxied)
@@ -568,12 +578,12 @@ app.post('/api/realtime/test-broadcast', (req, res) => {
 
 // Initialize server
 const startServer = async () => {
+  // Start listening immediately so Cloud Run startup probe succeeds even if DB is slow.
+  ensureServerListening();
+
   if (process.env.SKIP_DB === '1') {
     console.warn('Starting server with SKIP_DB=1 (database connection skipped).');
-    server.listen(PORT, () => {
-      console.log(`Server running (no DB) on port ${PORT}`);
-      console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
-    });
+    console.log(`Server running (no DB) on port ${PORT}`);
     return;
   }
 
@@ -585,7 +595,7 @@ const startServer = async () => {
     console.error('Database connection failed after retries:', e.message);
   }
   if (!conn) {
-    console.error('Database connection failed; server not started. Set SKIP_DB=1 to bypass during development.');
+    console.error('Database connection failed; server is running in degraded mode (no DB). Set SKIP_DB=1 to bypass during development.');
     return;
   }
 
@@ -676,10 +686,6 @@ const startServer = async () => {
     console.warn('[startup] Payment session janitor start failed:', e?.message || e);
   }
 
-  server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
-  });
   try { startPushScheduler(app); console.log('[startup] Push scheduler started'); } catch {}
   try { startMcgSyncScheduler(); console.log('[startup] MCG auto-pull scheduler started'); } catch {}
 };
