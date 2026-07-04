@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const fieldMappingSchema = new mongoose.Schema({
   sourceField: { type: String, required: true },
@@ -15,21 +16,8 @@ const statusMappingSchema = new mongoose.Schema({
   internalStatus: { type: String, required: true },
 }, { _id: false });
 
-const areaMappingSchema = new mongoose.Schema({
-  level: { type: String, enum: ['area', 'subArea'], default: 'area' },
-  areaId: { type: String, default: '' },
-  areaName: { type: String, default: '' },
-  subAreaId: { type: String, default: '' },
-  subAreaName: { type: String, default: '' },
-  storeCities: { type: [String], default: [] },
-}, { _id: false });
-
 const apiConfigurationSchema = new mongoose.Schema({
   baseUrl: { type: String, default: '' },
-  areaUrl: { type: String, default: '' },
-  subAreaUrl: { type: String, default: '' },
-  areaMethod: { type: String },
-  subAreaMethod: { type: String },
   authMethod: { type: String, enum: ['none', 'apiKey', 'basic', 'bearer'], default: 'none' },
   apiKey: { type: String },
   headers: { type: Map, of: String, default: {} },
@@ -77,12 +65,13 @@ const deliveryCompanySchema = new mongoose.Schema({
   apiConfiguration: { type: apiConfigurationSchema, default: () => ({}) },
   fieldMappings: { type: [fieldMappingSchema], default: [] },
   statusMapping: { type: [statusMappingSchema], default: [] },
-  areaMappings: { type: [areaMappingSchema], default: [] },
   customFields: { type: mongoose.Schema.Types.Mixed, default: {} },
 }, { timestamps: true });
 
-deliveryCompanySchema.index({ name: 1 }, { unique: true });
+deliveryCompanySchema.index({ tenantId: 1, name: 1 }, { unique: true });
 // Optional code index for lookups
-deliveryCompanySchema.index({ code: 1 }, { sparse: true });
+deliveryCompanySchema.index({ tenantId: 1, code: 1 }, { sparse: true });
+
+deliveryCompanySchema.plugin(tenantScopedModel);
 
 export default mongoose.model('DeliveryCompany', deliveryCompanySchema);

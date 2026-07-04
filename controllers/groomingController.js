@@ -273,6 +273,22 @@ export async function getBookingById(req, res) {
   }
 }
 
+export async function deleteBooking(req, res) {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ message: 'Missing id' });
+    const booking = await Booking.findById(id).populate('user', '_id email role');
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+    await BookingAudit.deleteMany({ booking: booking._id });
+    await Booking.deleteOne({ _id: booking._id });
+
+    res.json({ success: true, booking });
+  } catch (e) {
+    res.status(500).json({ message: 'Failed to delete booking', error: e?.message || e });
+  }
+}
+
 export async function cancelBooking(req, res) {
   try {
     const { id } = req.params;

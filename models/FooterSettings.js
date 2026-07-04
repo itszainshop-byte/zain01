@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const footerSettingsSchema = new mongoose.Schema({
   description: {
@@ -80,6 +81,8 @@ footerSettingsSchema.statics.createDefaultSettings = async function() {
     console.error('Error creating default footer settings:', error);
   }
 };
+
+footerSettingsSchema.plugin(tenantScopedModel);
 
 const FooterSettings = mongoose.model('FooterSettings', footerSettingsSchema);
 

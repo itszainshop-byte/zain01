@@ -1,3 +1,12 @@
+function computeInventoryStatus(quantity, lowStockThreshold = 5) {
+  const qty = Number(quantity) || 0;
+  const threshold = Number(lowStockThreshold);
+  const safeThreshold = Number.isFinite(threshold) ? threshold : 5;
+  if (qty <= 0) return 'out_of_stock';
+  if (qty <= safeThreshold) return 'low_stock';
+  return 'in_stock';
+}
+
 export const moveStockBetweenWarehouses = asyncHandler(async (req, res) => {
   const { product, size, color, variantId, quantity, fromWarehouse, toWarehouse, reason } = req.body;
   const userId = req.user?._id;
@@ -33,14 +42,18 @@ export const updateInventoryByProductColorSize = asyncHandler(async (req, res) =
     return res.status(StatusCodes.BAD_REQUEST).json({ message: 'Provide either variantId or both color and size' });
   }
   const query = variantId ? { product: productId, variantId } : { product: productId, color, size };
-  const inventory = await Inventory.findOneAndUpdate(
-    query,
-    { quantity },
-    { new: true, runValidators: true }
-  );
-  if (!inventory) {
+
+  const existing = await Inventory.findOne(query).select('lowStockThreshold');
+  if (!existing) {
     return res.status(StatusCodes.NOT_FOUND).json({ message: 'Inventory record not found' });
   }
+
+  const status = computeInventoryStatus(quantity, existing.lowStockThreshold);
+  const inventory = await Inventory.findOneAndUpdate(
+    query,
+    { $set: { quantity, status, lastUpdated: new Date() } },
+    { new: true, runValidators: true }
+  );
   try { await inventoryService.recomputeProductStock(productId); } catch {}
   res.status(StatusCodes.OK).json(inventory);
 });
@@ -206,12 +219,13 @@ export const updateInventoryByVariant = asyncHandler(async (req, res) => {
   try {
     // Normalize to ObjectId strings (Mongoose will cast but we keep consistent logs)
     const filter = { product: productId, variantId, warehouse: warehouseId };
+    let existingInventory = null;
     // Build $setOnInsert with attributesSnapshot when available to improve display in UI
     let setOnInsert = { product: productId, variantId, warehouse: warehouseId };
     try {
       // If this combination doesn't exist yet, attempt to derive attributesSnapshot from Product.variants
-      const exists = await Inventory.findOne(filter).lean();
-      if (!exists) {
+      existingInventory = await Inventory.findOne(filter).lean();
+      if (!existingInventory) {
         const prod = await Product.findById(productId).select('variants.attributes').lean();
         const v = Array.isArray(prod?.variants)
           ? prod.variants.find(x => String(x?._id) === String(variantId))
@@ -232,9 +246,10 @@ export const updateInventoryByVariant = asyncHandler(async (req, res) => {
       // Non-fatal: proceed without snapshot
       try { console.warn('[inventory][by-variant] snapshot build failed:', snapErr?.message || snapErr); } catch {}
     }
+    const status = computeInventoryStatus(quantity, existingInventory?.lowStockThreshold);
     // Use $setOnInsert to satisfy required fields when upserting a new row
     const update = {
-      $set: { quantity },
+      $set: { quantity, status, lastUpdated: new Date() },
       $setOnInsert: setOnInsert
     };
     const options = { new: true, runValidators: true, upsert: quantity > 0, setDefaultsOnInsert: true };
@@ -287,9 +302,10 @@ export const updateInventoryByVariant = asyncHandler(async (req, res) => {
         }
         // If we did not find rows (race condition), retry the original update once without upsert
         try {
+          const status = computeInventoryStatus(quantity);
           const retry = await Inventory.findOneAndUpdate(
             filter,
-            { $set: { quantity }, $setOnInsert: { product: pid, variantId: vid, warehouse: wid } },
+            { $set: { quantity, status, lastUpdated: new Date() }, $setOnInsert: { product: pid, variantId: vid, warehouse: wid } },
             { new: true, runValidators: true, upsert: quantity > 0, setDefaultsOnInsert: true }
           );
           if (retry) {

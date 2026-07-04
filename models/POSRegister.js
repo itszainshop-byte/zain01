@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const posRegisterSchema = new mongoose.Schema({
   name: {
@@ -60,5 +61,7 @@ const posRegisterSchema = new mongoose.Schema({
 // Indexes for better performance
 posRegisterSchema.index({ isActive: 1 });
 posRegisterSchema.index({ location: 1 });
+
+posRegisterSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('POSRegister', posRegisterSchema);

@@ -1,5 +1,4 @@
 import recipientRoutes from './routes/recipientRoutes.js';
-import checkoutDraftRoutes from './routes/checkoutDraftRoutes.js';
 // Runtime sanity check: ensure this file is loaded from the expected project/server directory structure.
 // Misconfiguration (e.g., running `node index.js` at repo root without adjusting rootDir) previously caused
 // attempts to resolve './userRoutes.js' from the wrong working directory, leading to ERR_MODULE_NOT_FOUND.
@@ -28,6 +27,7 @@ import { WebSocketServer } from 'ws';
 import { errorHandler } from './middleware/errorHandler.js';
 import cookieParser from 'cookie-parser';
 import cspMiddleware from './middleware/csp.js';
+import { tenantContext } from './middleware/tenantContext.js';
 
 // Route Imports
 import userRoutes from './routes/userRoutes.js';
@@ -76,17 +76,15 @@ import rivhitRoutes from './routes/rivhitRoutes.js';
 import mcgRoutes from './routes/mcgRoutes.js';
 import zcreditRoutes from './routes/zcreditRoutes.js';
 import zcreditGatewayRoutes from './routes/zcreditGatewayRoutes.js';
-import meshulamRoutes from './routes/meshulamRoutes.js';
 import mobilePushRoutes from './routes/mobilePushRoutes.js';
 import groomingRoutes from './routes/groomingRoutes.js';
-import visitorRoutes from './routes/visitorRoutes.js';
-import metaConversionsRoutes from './routes/metaConversionsRoutes.js';
+import searchRoutes from './routes/searchRoutes.js';
+import tenantRoutes from './routes/tenantRoutes.js';
 // Lazy import function to warm DeepSeek config from DB
 import { loadDeepseekConfigFromDb } from './services/translate/deepseek.js';
 import { startPushScheduler } from './services/pushScheduler.js';
 import { startMcgSyncScheduler } from './services/mcgSyncScheduler.js';
 import { startPaymentSessionJanitor } from './services/paymentSessionJanitor.js';
-import { startCheckoutDraftReminderScheduler } from './services/checkoutDraftReminderScheduler.js';
 
 // Path Setup
 const __filename = fileURLToPath(import.meta.url);
@@ -101,6 +99,7 @@ const app = express();
 // Middleware
 // Behind proxies (Render/Netlify/etc.) trust X-Forwarded-* to populate req.ip properly
 app.set('trust proxy', true);
+app.use(tenantContext);
 // Lightweight request logging & version header
 let APP_VERSION = process.env.APP_VERSION || '';
 try {
@@ -119,7 +118,7 @@ app.use((req, res, next) => {
   res.on('finish', () => {
     const duration = Date.now() - start;
     const user = req.user ? `${req.user._id}:${req.user.role}` : 'anon';
-    console.log(`REQ ${req.method} ${req.originalUrl} -> ${res.statusCode} ${duration}ms auth=${authHeader? 'y':'n'} user=${user}`);
+    console.log(`REQ ${req.method} ${req.originalUrl} -> ${res.statusCode} ${duration}ms tenant=${req.tenantId || 'default'} auth=${authHeader? 'y':'n'} user=${user}`);
   });
   next();
 });
@@ -131,7 +130,7 @@ const defaultAllowedOrigins = [
   'http://127.0.0.1:3000',
   'https://relaxed-cucurucho-360448.netlify.app',
   // Self origin (Render) – harmless for health checks and internal tools
-  'https://zain-311868330365.europe-west1.run.app'
+  'https://mypet-778751110625.europe-west1.run.app'
 ];
 
 // Allow override via env (comma-separated list). Merge instead of replace to always keep dev/local origins.
@@ -140,88 +139,48 @@ const envOrigins = (process.env.CORS_ORIGINS || '')
   .map(s => s.trim())
   .filter(Boolean);
 
-// Single-value envs that should also be whitelisted automatically if present
-const singletonEnvOrigins = [
-  process.env.PUBLIC_WEB_URL,
-  process.env.PUBLIC_API_URL,
-  process.env.PUBLIC_ASSETS_BASE_URL,
-  process.env.FRONTEND_BASE_URL,
-  process.env.STORE_BASE_URL,
-  process.env.ADMIN_BASE_URL
-].filter(Boolean);
-
-const normalizeOrigin = (value) => {
-  if (!value) return '';
-  try {
-    const urlObj = new URL(value);
-    // urlObj.origin strips any trailing slash and normalizes casing
-    return urlObj.origin;
-  } catch {
-    // Fallback: trim whitespace and trailing slashes
-    return String(value).trim().replace(/\/+$/, '');
-  }
-};
-
-const configOrigins = [...defaultAllowedOrigins, ...envOrigins, ...singletonEnvOrigins]
-  .map(normalizeOrigin)
-  .filter(Boolean);
-
 // Union defaults + env overrides without duplicates
-const allowedOrigins = [...new Set(configOrigins)];
-const allowedOriginSet = new Set(allowedOrigins);
-const allowedHostnames = new Set(
-  allowedOrigins
-    .map(origin => {
-      try { return new URL(origin).hostname.toLowerCase(); } catch { return ''; }
-    })
-    .filter(Boolean)
-);
-
-const netlifyRegex = /.netlify\.(app|live)$/i;
-const allowAllCors = String(process.env.CORS_ALLOW_ALL || '').toLowerCase() === 'true';
-
-const isOriginAllowed = (origin) => {
-  if (!origin) return true; // Non-browser callers
-  if (allowAllCors) return true;
-
-  const normalized = normalizeOrigin(origin);
-  if (allowedOriginSet.has(normalized)) return true;
-
-  try {
-    const { hostname } = new URL(normalized);
-    if (allowedHostnames.has(hostname.toLowerCase())) return true;
-  } catch {
-    // ignore parse errors; fall through to regex checks
-  }
-
-  if (netlifyRegex.test(origin)) return true;
-
-  // Allow any localhost/127.x origin regardless of port for development
-  try {
-    const devHost = new URL(normalized).hostname;
-    if (['localhost', '127.0.0.1', '::1'].includes(devHost)) return true;
-  } catch {}
-
-  // Allow private LAN IPs during non-production testing (e.g., phone on same Wi-Fi)
-  try {
-    const host = new URL(normalized).hostname;
-    const isPrivateIPv4 = /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
-    if (isPrivateIPv4 && process.env.NODE_ENV !== 'production') return true;
-  } catch {}
-
-  return false;
-};
+const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...envOrigins])];
+const allowedCorsHeaders = [
+  'Content-Type',
+  'Authorization',
+  'X-Tenant-Id',
+  'X-Requested-With',
+  'Accept',
+  'Accept-Language',
+  'X-Client-Type',
+  'X-Client-Platform',
+  'X-Refresh-Token',
+];
 
 const corsOptions = {
   origin: function(origin, callback) {
-    if (isOriginAllowed(origin)) return callback(null, true);
-
+    // Allow non-browser requests (no origin) like curl/health checks
+    if (!origin) return callback(null, true);
+    // Allow any Netlify preview/production subdomain if desired
+    const isNetlify = /.netlify\.app$/i.test(origin) || /.netlify\.live$/i.test(origin);
+    // Allow any localhost/127.0.0.1 origin regardless of port for development
+    try {
+      const u = new URL(origin);
+      const host = u.hostname;
+      if (['localhost', '127.0.0.1', '::1'].includes(host)) {
+        return callback(null, true);
+      }
+      // Allow private LAN IPs during development (e.g., testing from a phone on 192.168.x.x)
+      const isPrivateIPv4 = /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+      if (isPrivateIPv4 && process.env.NODE_ENV !== 'production') {
+        return callback(null, true);
+      }
+    } catch {}
+    if (allowedOrigins.includes(origin) || isNetlify) {
+      return callback(null, true);
+    }
     // Enhanced diagnostic: log rejected origin for visibility (will surface in Cloud Run logs)
     console.warn('[cors][reject] origin=', origin, 'allowedOrigins=', allowedOrigins);
     return callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  allowedHeaders: allowedCorsHeaders,
   // We now rely on httpOnly refresh token cookie (rt) for /api/auth/refresh. Enable credentials.
   credentials: true,
   optionsSuccessStatus: 204
@@ -233,16 +192,25 @@ app.options('*', cors(corsOptions));
 // Reinforce credentials & dynamic origin echo after cors() in case upstream config omits header
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && isOriginAllowed(origin)) {
-    const echoedOrigin = normalizeOrigin(origin) || origin;
-    // Only set ACAO if not already set by cors (avoid header duplication)
-    if (!res.getHeader('Access-Control-Allow-Origin')) {
-      res.setHeader('Access-Control-Allow-Origin', echoedOrigin);
+  if (origin) {
+    // Re-run origin allow logic similar to corsOptions.origin
+    let allow = false;
+    try {
+      const u = new URL(origin);
+      if (['localhost','127.0.0.1','::1'].includes(u.hostname)) allow = true;
+    } catch {}
+    const isNetlify = /\.netlify\.(app|live)$/i.test(origin);
+    if (!allow && (isNetlify || allowedOrigins.includes(origin))) allow = true;
+    if (allow) {
+      // Only set ACAO if not already set by cors (avoid header duplication)
+      if (!res.getHeader('Access-Control-Allow-Origin')) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+      }
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      const vary = res.getHeader('Vary');
+      if (!vary) res.setHeader('Vary', 'Origin');
+      else if (!String(vary).includes('Origin')) res.setHeader('Vary', vary + ', Origin');
     }
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    const vary = res.getHeader('Vary');
-    if (!vary) res.setHeader('Vary', 'Origin');
-    else if (!String(vary).includes('Origin')) res.setHeader('Vary', vary + ', Origin');
   }
   next();
 });
@@ -250,188 +218,8 @@ app.use((req, res, next) => {
 // Apply Content Security Policy middleware
 app.use(cspMiddleware);
 
-const readRawRequestBody = (req, limitBytes = 2 * 1024 * 1024) => new Promise((resolve, reject) => {
-  let total = 0;
-  const chunks = [];
-  req.on('data', (chunk) => {
-    total += chunk.length;
-    if (total > limitBytes) {
-      const err = new Error('Request body too large');
-      err.statusCode = 413;
-      reject(err);
-      req.destroy(err);
-      return;
-    }
-    chunks.push(chunk);
-  });
-  req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-  req.on('error', reject);
-});
-
-const firstJsonObjectText = (value) => {
-  const start = value.indexOf('{');
-  if (start < 0) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < value.length; i += 1) {
-    const ch = value[i];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\') {
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (ch === '{') depth += 1;
-    if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) return value.slice(start, i + 1);
-    }
-  }
-  return null;
-};
-
-const parseOrderJsonBody = (raw) => {
-  const trimmed = String(raw || '').trim();
-  if (!trimmed) return {};
-
-  const parseQueryStringLike = (value) => {
-    const looksLikeQuery = value.includes('=') && (!value.includes('{') || value.indexOf('=') < value.indexOf('{'));
-    if (!looksLikeQuery) return null;
-    const params = new URLSearchParams(value);
-    const out = {};
-    for (const [k, v] of params.entries()) {
-      if (!k) continue;
-      out[k] = v;
-    }
-    return Object.keys(out).length ? out : null;
-  };
-
-  const extractLooseField = (value, fieldName) => {
-    const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const patterns = [
-      new RegExp(`["']${escaped}["']\\s*:\\s*["']([^"']+)["']`, 'i'),
-      new RegExp(`${escaped}\\s*:\\s*["']([^"']+)["']`, 'i'),
-      new RegExp(`["']${escaped}["']\\s*:\\s*([A-Za-z0-9_.-]+)`, 'i'),
-      new RegExp(`${escaped}\\s*:\\s*([A-Za-z0-9_.-]+)`, 'i')
-    ];
-    for (const pattern of patterns) {
-      const match = value.match(pattern);
-      if (match && match[1]) return String(match[1]).trim();
-    }
-    return '';
-  };
-
-  const repaired = trimmed
-    // Common typo: duplicated quotes around string values
-    .replace(/""([^"\\]*(?:\\.[^"\\]*)*)""/g, '"$1"')
-    // Smart quotes copied from chat/tools
-    .replace(/[\u201c\u201d]/g, '"')
-    .replace(/[\u2018\u2019]/g, "'")
-    // Trailing commas before object/array close
-    .replace(/,\s*([}\]])/g, '$1')
-    // Missing comma between fields, e.g. "customer_area":"x" "driver_name":"y"
-    .replace(/("(?:[^"\\]|\\.)*"|true|false|null|-?\d+(?:\.\d+)?)\s+("[A-Za-z0-9_]+"\s*:)/g, '$1, $2');
-
-  const queryParsed = parseQueryStringLike(trimmed);
-  if (queryParsed) {
-    try {
-      console.warn('[orders][json-recover] parsed query-like payload keys=', Object.keys(queryParsed));
-    } catch {}
-    return queryParsed;
-  }
-
-  const attempts = [trimmed, repaired];
-  for (const candidate of attempts) {
-    try { return JSON.parse(candidate); } catch {}
-    const firstObject = firstJsonObjectText(candidate);
-    if (firstObject && firstObject !== candidate) {
-      try { return JSON.parse(firstObject); } catch {}
-    }
-  }
-
-  // Last-resort recovery for status update payloads; keeps order update flows alive
-  // when callers send nearly-JSON text with a single malformed segment.
-  const status = extractLooseField(repaired, 'status');
-  const orderNumber = extractLooseField(repaired, 'orderNumber') || extractLooseField(repaired, 'order_number');
-  if (status || orderNumber) {
-    const recovered = {};
-    if (status) recovered.status = status;
-    if (orderNumber) recovered.orderNumber = orderNumber;
-    try {
-      console.warn('[orders][json-recover] recovered from malformed JSON keys=', Object.keys(recovered), 'rawLength=', trimmed.length);
-    } catch {}
-    return recovered;
-  }
-
-  const err = new SyntaxError('Malformed JSON body. Send valid JSON, for example {"status":"processing"}.');
-  err.status = 400;
-  err.body = raw;
-  throw err;
-};
-
-app.use(async (req, res, next) => {
-  const method = String(req.method || '').toUpperCase();
-  const contentType = String(req.headers['content-type'] || '').toLowerCase();
-  const pathValue = String(req.path || req.originalUrl || '').toLowerCase();
-  const isOrderRoute = /(^|\/)orders(\/|$)/.test(pathValue);
-  const isDeliveryWebhookRoute = /(^|\/)delivery\/webhook\/status(\/|$)/.test(pathValue);
-  const isMultipart = contentType.includes('multipart/form-data');
-  const isUrlEncoded = contentType.includes('application/x-www-form-urlencoded');
-  const shouldParseOrderJson = (isOrderRoute || isDeliveryWebhookRoute)
-    && ['POST', 'PUT', 'PATCH'].includes(method)
-    && !isMultipart
-    && !isUrlEncoded;
-
-  if (!shouldParseOrderJson) return next();
-
-  try {
-    const raw = await readRawRequestBody(req);
-    req.body = parseOrderJsonBody(raw);
-    req._body = true;
-    return next();
-  } catch (error) {
-    return next(error);
-  }
-});
-
 // Allow larger JSON payloads (city bulk uploads, etc.) without triggering 413 errors
 app.use(express.json({ limit: '2mb' }));
-// Fallback recovery: if body-parser rejects malformed JSON on order routes,
-// attempt the same tolerant parsing from the raw body and continue.
-app.use((err, req, res, next) => {
-  const method = String(req.method || '').toUpperCase();
-  const pathValue = String(req.path || req.originalUrl || '').toLowerCase();
-  const isOrderRoute = /(^|\/)orders(\/|$)/.test(pathValue);
-  const isDeliveryWebhookRoute = /(^|\/)delivery\/webhook\/status(\/|$)/.test(pathValue);
-  const isJsonSyntaxError = err instanceof SyntaxError && err.status === 400 && Object.prototype.hasOwnProperty.call(err, 'body');
-
-  if (!isJsonSyntaxError || !(isOrderRoute || isDeliveryWebhookRoute) || !['POST', 'PUT', 'PATCH'].includes(method)) {
-    return next(err);
-  }
-
-  try {
-    const recovered = parseOrderJsonBody(err.body || '');
-    if (recovered && typeof recovered === 'object' && Object.keys(recovered).length > 0) {
-      try {
-        console.warn('[orders][json-recover] body-parser fallback engaged method=', method, 'path=', req.originalUrl || req.path, 'keys=', Object.keys(recovered));
-      } catch {}
-      req.body = recovered;
-      req._body = true;
-      return next();
-    }
-  } catch {}
-
-  return next(err);
-});
-// Accept urlencoded for gateway callbacks; additional raw body parsing can be added per-route if needed
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(cookieParser());
 // Serve static for service worker if behind express (especially in production)
@@ -450,7 +238,7 @@ const buildZCreditDeepLinkHtml = (params = {}) => {
   const qp = [`status=${encodeURIComponent(status)}`];
   if (session) qp.push(`session=${encodeURIComponent(session)}`);
   if (orderNumber) qp.push(`order=${encodeURIComponent(orderNumber)}`);
-  const deepLink = `zains://zcredit-return?${qp.join('&')}`;
+  const deepLink = `mypets://zcredit-return?${qp.join('&')}`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -495,7 +283,7 @@ app.get(['/zcredit-mobile-success', '/zcredit-mobile-success.html'], (req, res, 
 app.use('/uploads', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.setHeader('Access-Control-Allow-Headers', allowedCorsHeaders.join(', '));
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   next();
 }, express.static(path.resolve(__dirname, '../uploads')));
@@ -504,6 +292,7 @@ app.use('/uploads', (req, res, next) => {
 
 // API Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/tenants', tenantRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
@@ -524,7 +313,6 @@ app.use('/api/mobile-banners', mobileBannerRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/gift-cards', giftCardRoutes);
 app.use('/api/recipients', recipientRoutes);
-app.use('/api/checkout-drafts', checkoutDraftRoutes);
 app.use('/api/coupons', couponRoutes);
 app.use('/api/warehouses', warehouseRoutes);
 app.use('/api/shipping', shippingRoutes); // Added Shipping Routes
@@ -554,11 +342,9 @@ app.use('/api/rivhit', rivhitRoutes);
 app.use('/api/mcg', mcgRoutes);
 app.use('/api/zcredit', zcreditRoutes);
 app.use('/api/zcredit-gw', zcreditGatewayRoutes);
-app.use('/api/meshulam', meshulamRoutes);
 app.use('/api/cancellation-requests', cancellationRequestRoutes);
 app.use('/api/grooming', groomingRoutes);
-app.use('/api/visitors', visitorRoutes);
-app.use('/api/conversions', metaConversionsRoutes);
+app.use('/api/search-logs', searchRoutes);
 
 // Health Check Route
 app.get('/health', (req, res) => {
@@ -588,7 +374,6 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-const HOST = process.env.HOST || '0.0.0.0';
 
 // Create HTTP server
 const server = createServer(app);
@@ -783,22 +568,12 @@ app.post('/api/realtime/test-broadcast', (req, res) => {
 
 // Initialize server
 const startServer = async () => {
-  const startListening = () => {
-    if (server.listening) return;
-    server.listen(PORT, HOST, () => {
-      console.log(`Server running on http://${HOST}:${PORT}`);
-      console.log(`WebSocket server running on ws://${HOST}:${PORT}/ws`);
-    });
-    server.on('error', (err) => {
-      console.error('[startup] Server listen error:', err?.message || err);
-    });
-  };
-
-  // Always start listening first (Cloud Run expects PORT to bind quickly)
-  startListening();
-
   if (process.env.SKIP_DB === '1') {
     console.warn('Starting server with SKIP_DB=1 (database connection skipped).');
+    server.listen(PORT, () => {
+      console.log(`Server running (no DB) on port ${PORT}`);
+      console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
+    });
     return;
   }
 
@@ -810,7 +585,7 @@ const startServer = async () => {
     console.error('Database connection failed after retries:', e.message);
   }
   if (!conn) {
-    console.error('Database connection failed; server running without DB. Set SKIP_DB=1 to bypass during development.');
+    console.error('Database connection failed; server not started. Set SKIP_DB=1 to bypass during development.');
     return;
   }
 
@@ -901,11 +676,12 @@ const startServer = async () => {
     console.warn('[startup] Payment session janitor start failed:', e?.message || e);
   }
 
-  // Already listening; no-op if called again
-  startListening();
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
+  });
   try { startPushScheduler(app); console.log('[startup] Push scheduler started'); } catch {}
   try { startMcgSyncScheduler(); console.log('[startup] MCG auto-pull scheduler started'); } catch {}
-  try { startCheckoutDraftReminderScheduler(); console.log('[startup] Checkout reminder scheduler started'); } catch {}
 };
 
 // Start server

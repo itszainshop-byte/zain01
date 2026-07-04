@@ -1,11 +1,11 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 import { nanoid } from 'nanoid';
 
 const couponSchema = new mongoose.Schema({
   code: {
     type: String,
     required: true,
-    unique: true,
     uppercase: true,
     default: () => nanoid(8).toUpperCase()
   },
@@ -62,7 +62,9 @@ const couponSchema = new mongoose.Schema({
 });
 
 // Add index for efficient querying
-couponSchema.index({ code: 1 }, { unique: true });
+couponSchema.index({ tenantId: 1, code: 1 }, { unique: true });
 couponSchema.index({ startDate: 1, endDate: 1, isActive: 1 });
+
+couponSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Coupon', couponSchema);

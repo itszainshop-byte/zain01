@@ -1,11 +1,11 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 import cryptoRandomString from 'crypto-random-string';
 
 const giftCardSchema = new mongoose.Schema({
   code: {
     type: String,
     required: true,
-    unique: true,
     default: () => cryptoRandomString({ length: 16, type: 'alphanumeric' }).toUpperCase()
   },
   initialBalance: {
@@ -72,8 +72,10 @@ giftCardSchema.pre('save', function(next) {
 });
 
 // Add index for efficient querying
-giftCardSchema.index({ code: 1 }, { unique: true });
+giftCardSchema.index({ tenantId: 1, code: 1 }, { unique: true });
 giftCardSchema.index({ status: 1, expiryDate: 1 });
 giftCardSchema.index({ purchasedBy: 1 });
+
+giftCardSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('GiftCard', giftCardSchema);

@@ -119,7 +119,7 @@ export async function sendTestToMe(req, res) {
     }
     const result = await sendExpoPush({
       tokens: expoTokens,
-      title: 'Hello from zain',
+      title: 'Hello from My Pet',
       body: 'This is a test push notification',
       data: payloadData,
       badge: typeof badge === 'number' ? badge : undefined,
@@ -167,7 +167,7 @@ export async function broadcastToAdmins(req, res) {
     const payloadData = shapePayloadData(data || {}, nid, resolvedImage);
     let badges;
     if (typeof badge !== 'number') {
-      const tokenDocs = await MobilePushToken.find({ user: { $in: q.map(d => d.u._id) } }).lean().select('expoPushToken user');
+      const tokenDocs = await MobilePushToken.find({ expoPushToken: { $in: tokens } }).lean().select('expoPushToken user');
       badges = await computeBadgesForTokens(tokenDocs);
     }
     const result = await sendExpoPush({ tokens, title, body, data: payloadData, badge: typeof badge === 'number' ? badge : undefined, badges, sound: sound || undefined, channelId: channelId || undefined, imageUrl: resolvedImage });

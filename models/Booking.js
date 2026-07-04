@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const ServiceSchema = new mongoose.Schema({
   id: { type: String, required: true },
@@ -21,5 +22,7 @@ const BookingSchema = new mongoose.Schema({
 
 // Prevent duplicate booking for same slot (optional uniqueness constraint)
 BookingSchema.index({ date: 1, time: 1, user: 1 }, { unique: false });
+
+BookingSchema.plugin(tenantScopedModel);
 
 export default mongoose.models.Booking || mongoose.model('Booking', BookingSchema);

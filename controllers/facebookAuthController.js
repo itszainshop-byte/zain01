@@ -1,7 +1,7 @@
 import User from '../models/User.js';
 import Settings from '../models/Settings.js';
-import { signUserJwt } from '../utils/jwt.js';
-import jwt from 'jsonwebtoken';
+import { issueAuthTokens } from '../utils/authTokens.js';
+import { getWelcomeCouponCode } from '../utils/welcomeCoupon.js';
 
 // POST /api/auth/facebook
 // Body: { accessToken } obtained via Facebook JS SDK or mobile SDK
@@ -52,6 +52,7 @@ export const facebookAuth = async (req, res) => {
     }
 
     let user = await User.findOne({ $or: [ { facebookId }, { email } ] });
+    let isNewUser = false;
     if (!user) {
       user = new User({
         name,
@@ -63,6 +64,7 @@ export const facebookAuth = async (req, res) => {
         lastLoginAt: new Date()
       });
       await user.save();
+      isNewUser = true;
     } else {
       let modified = false;
       if (!user.facebookId) { user.facebookId = facebookId; modified = true; }
@@ -73,28 +75,12 @@ export const facebookAuth = async (req, res) => {
     }
 
     // Issue tokens similar to authController/googleAuth
-    const accessTtl = 60 * 60; // 1h seconds
-    const accessTokenJwt = signUserJwt(user._id, { expiresIn: '1h' });
-    const refreshTtlDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
-    const refreshTtlMs = refreshTtlDays * 24 * 60 * 60 * 1000;
-    const refreshSecret = process.env.REFRESH_JWT_SECRET || process.env.JWT_SECRET;
-    const refreshToken = jwt.sign({ sub: user._id.toString(), type: 'refresh' }, refreshSecret, { expiresIn: `${refreshTtlDays}d` });
+    const accessTtl = 60 * 60;
+    const { accessToken: sessionToken, refreshToken } = issueAuthTokens(req, res, user._id, { accessExpiresIn: '1h' });
 
-    const allowCrossSite = ['1','true','yes','on'].includes(String(process.env.ALLOW_CROSS_SITE_COOKIES || '').toLowerCase());
-    let cookieSameSite = (process.env.COOKIE_SAMESITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax')).toLowerCase();
-    if (allowCrossSite) cookieSameSite = 'none';
-    const sameSiteValue = ['lax','strict','none'].includes(cookieSameSite) ? cookieSameSite : 'lax';
-
-    res.cookie('rt', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: sameSiteValue,
-      maxAge: refreshTtlMs,
-      path: '/api/auth'
-    });
-
-    return res.json({
-      token: accessTokenJwt,
+    const welcomeCouponCode = isNewUser ? await getWelcomeCouponCode() : '';
+    const payload = {
+      token: sessionToken,
       expiresIn: accessTtl,
       user: {
         id: user._id,
@@ -104,7 +90,15 @@ export const facebookAuth = async (req, res) => {
         image: user.image || null,
         provider: user.provider
       }
-    });
+    };
+    if (refreshToken) {
+      payload.refreshToken = refreshToken;
+    }
+    if (welcomeCouponCode) {
+      payload.welcomeCoupon = { code: welcomeCouponCode };
+    }
+
+    return res.json(payload);
   } catch (e) {
     console.error('Facebook auth error:', e);
     return res.status(500).json({ message: 'Facebook authentication failed' });

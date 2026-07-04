@@ -6,7 +6,7 @@ import Inventory from '../models/Inventory.js';
 import { inventoryService } from '../services/inventoryService.js';
 import { SUPPORTED_CURRENCIES } from '../utils/currency.js';
 import { realTimeEventService } from '../services/realTimeEventService.js';
-import { sendPushToAll, sendPushToAdmins } from '../services/pushService.js';
+import { sendPushToAdmins, sendPushToUser } from '../services/pushService.js';
 // Mobile (Expo) push support
 import MobilePushToken from '../models/MobilePushToken.js';
 import { sendExpoPush } from '../services/expoPushService.js';
@@ -17,52 +17,6 @@ import User from '../models/User.js';
 import { calculateShippingFee as calcShipFee } from '../services/shippingService.js';
 import DeliveryCompany from '../models/DeliveryCompany.js';
 import { sendToCompany, mapStatus, validateRequiredMappings, validateCompanyConfiguration } from '../services/deliveryIntegrationService.js';
-import { normalizePhoneE164ish } from '../utils/phone.js';
-import { trackPurchase } from '../services/metaConversionsService.js';
-
-const ORDER_STATUS_VALUES = Order.schema.path('status')?.enumValues || ['pending', 'processing', 'shipped', 'delivered', 'cancelled'];
-const isValidOrderStatus = (status) => typeof status === 'string' && ORDER_STATUS_VALUES.includes(status);
-
-const validateOrderStatusPayload = (status, res) => {
-  if (isValidOrderStatus(status)) return true;
-  res.status(400).json({
-    message: `Invalid order status. Allowed values: ${ORDER_STATUS_VALUES.join(', ')}`
-  });
-  return false;
-};
-
-const applyOrderStatusUpdate = async (order, status, userId = null) => {
-  const prevStatus = order.status;
-  order.status = status;
-  await order.save();
-
-  let invCfg = null;
-  try { invCfg = (await Settings.findOne())?.inventory || null; } catch {}
-  const hasCfg = invCfg && (Object.prototype.hasOwnProperty.call(invCfg, 'reserveOnCheckout') || Object.prototype.hasOwnProperty.call(invCfg, 'autoDecrementOnOrder'));
-  const decrementedAtOrder = hasCfg ? !!(invCfg?.reserveOnCheckout || invCfg?.autoDecrementOnOrder) : true;
-  const shouldDecrementOnDelivery = !decrementedAtOrder;
-
-  const asInventoryItems = (items) => items.map(it => ({
-    product: it.product,
-    quantity: it.quantity,
-    ...(it.variantId ? { variantId: it.variantId } : { size: it.size, color: it.color })
-  }));
-
-  if ((status === 'delivered' || status === 'fulfilled') && prevStatus !== status && shouldDecrementOnDelivery) {
-    try { await inventoryService.reserveItems(asInventoryItems(order.items), userId); } catch (e) { console.warn('Delivery decrement failed:', e?.message || e); }
-  }
-
-  if (status === 'cancelled' && prevStatus !== status && invCfg?.autoIncrementOnCancel && decrementedAtOrder) {
-    try { await inventoryService.incrementItems(asInventoryItems(order.items), userId, 'Order cancelled'); } catch (e) { console.warn('Cancel increment failed:', e?.message || e); }
-  }
-
-  if (status === 'returned' && prevStatus !== status && invCfg?.autoIncrementOnReturn) {
-    try { await inventoryService.incrementItems(asInventoryItems(order.items), userId, 'Order returned'); } catch (e) { console.warn('Return increment failed:', e?.message || e); }
-  }
-
-  realTimeEventService.emitOrderUpdate(order);
-  return order;
-};
 
 // Update (admin) - update recipient/customer info, shipping address (city/street), status, and optionally shipping fee
 export const updateOrder = async (req, res) => {
@@ -72,6 +26,7 @@ export const updateOrder = async (req, res) => {
       customerInfo: ci,
       shippingAddress: sa,
       status,
+      paymentStatus,
       shippingFee,
       deliveryFee
     } = req.body || {};
@@ -100,20 +55,19 @@ export const updateOrder = async (req, res) => {
     }
 
     // Status update
-    if (status !== undefined) {
-      if (!isValidOrderStatus(status)) {
-        return res.status(400).json({
-          message: `Invalid order status. Allowed values: ${ORDER_STATUS_VALUES.join(', ')}`
-        });
-      }
-      if (status !== order.status) order.status = status;
+    if (status && typeof status === 'string' && status !== order.status) {
+      order.status = status;
     }
 
-    // Optional shipping fee override (mirror logic with pre-save hook)
+    if (paymentStatus && typeof paymentStatus === 'string' && ['pending', 'completed', 'failed'].includes(paymentStatus)) {
+      order.paymentStatus = paymentStatus;
+    }
+
+    // Optional shipping fee override (support zero values and legacy deliveryFee in same request)
     if (typeof shippingFee === 'number' && shippingFee >= 0) {
       order.shippingFee = shippingFee;
-    } else if (typeof deliveryFee === 'number' && deliveryFee >= 0) {
-      // legacy field
+    }
+    if (typeof deliveryFee === 'number' && deliveryFee >= 0) {
       order.deliveryFee = deliveryFee;
     }
 
@@ -131,18 +85,10 @@ export const updateOrder = async (req, res) => {
 
 // Create order
 export const createOrder = async (req, res) => {
-  const maxRetries = 2;
-  const isWriteConflict = (err) => {
-    const code = err?.code;
-    const labels = err?.errorLabels || err?.errorLabels || [];
-    const msg = String(err?.message || '');
-    return code === 112 || labels.includes('TransientTransactionError') || /WriteConflict/i.test(msg);
-  };
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const session = await mongoose.startSession();
-    let useTransaction = false;
+  const session = await mongoose.startSession();
+  let useTransaction = false;
 
-    try {
+  try {
     console.log('createOrder called with body:', JSON.stringify(req.body, null, 2));
     // Guard against SKIP_DB mode: meaningful error instead of opaque 500s when DB is intentionally disabled.
     if (process.env.SKIP_DB === '1') {
@@ -158,14 +104,6 @@ export const createOrder = async (req, res) => {
       return res.status(409).json({
         message: 'Card payments must be created after the provider confirms payment. Start a payment session instead of calling /orders directly.',
         code: 'CARD_PAYMENT_REQUIRES_SESSION'
-      });
-    }
-
-    const blockPaypalDrafts = String(process.env.ALLOW_PAYPAL_ORDER_DRAFTS || 'false').toLowerCase() !== 'true';
-    if (blockPaypalDrafts && paymentMethod === 'paypal') {
-      return res.status(409).json({
-        message: 'PayPal orders are created only after payment is captured. Use /paypal/create-order and /paypal/capture-order instead of /orders.',
-        code: 'PAYPAL_PAYMENT_REQUIRES_SESSION'
       });
     }
 
@@ -213,69 +151,6 @@ export const createOrder = async (req, res) => {
 
     if (!shippingAddress?.street || !shippingAddress?.city || !shippingAddress?.country) {
       return res.status(400).json({ message: 'Complete shipping address is required' });
-    }
-
-    const normalizeCountryCode = (value) => {
-      if (!value) return value;
-      let raw = String(value).trim();
-
-      // Accept UI values like "IL - Israel" from landing page datalist.
-      if (raw.includes(' - ')) {
-        raw = raw.split(' - ')[0].trim();
-      }
-
-      const upper = raw.toUpperCase();
-      if (/^[A-Z]{2,3}$/.test(upper)) {
-        return upper === 'PS' ? 'IL' : upper;
-      }
-
-      // Backward compatibility for older landing pages that submit country names.
-      const byName = {
-        ISRAEL: 'IL',
-        JORDAN: 'JO',
-        'SAUDI ARABIA': 'SA',
-        UAE: 'AE',
-        KUWAIT: 'KW',
-        QATAR: 'QA',
-        BAHRAIN: 'BH',
-        OMAN: 'OM',
-        EGYPT: 'EG',
-        IRAQ: 'IQ',
-        LEBANON: 'LB',
-      };
-      return byName[upper] || 'IL';
-    };
-    shippingAddress.country = normalizeCountryCode(shippingAddress.country);
-
-    const normalizeOrderMobile = (value, countryCode) => {
-      if (!value) return '';
-      const parsed = normalizePhoneE164ish(value, countryCode || undefined);
-      const raw = String(parsed || value).trim();
-      const digits = raw.replace(/\D/g, '');
-      const defaultDialCode = String(process.env.DEFAULT_COUNTRY_CODE || process.env.TWILIO_DEFAULT_COUNTRY_CODE || '972').replace(/\D/g, '');
-
-      let candidate = raw;
-      if (!candidate.startsWith('+')) {
-        if (digits.startsWith('0') && defaultDialCode) {
-          candidate = `+${defaultDialCode}${digits.slice(1)}`;
-        } else {
-          candidate = `+${digits}`;
-        }
-      }
-
-      // Keep aligned with Order model validator (country-code + national number)
-      return /^\+[0-9]{1,4}[0-9]{9,10}$/.test(candidate) ? candidate : '';
-    };
-
-    const normalizedMobile = normalizeOrderMobile(customerInfo.mobile, shippingAddress.country);
-    if (!normalizedMobile) {
-      return res.status(400).json({ message: 'Invalid mobile number format. Please include a valid phone number.' });
-    }
-    customerInfo.mobile = normalizedMobile;
-
-    if (customerInfo.secondaryMobile) {
-      const normalizedSecondary = normalizeOrderMobile(customerInfo.secondaryMobile, shippingAddress.country);
-      customerInfo.secondaryMobile = normalizedSecondary || undefined;
     }
 
     const normalizedAreaGroup = typeof shippingAddress.areaGroup === 'string' ? shippingAddress.areaGroup.trim() : '';
@@ -451,22 +326,16 @@ export const createOrder = async (req, res) => {
       costComponents: []
     };
     const allowClientProvided = String(process.env.ALLOW_CLIENT_SHIPPING_FEE || 'true').toLowerCase() !== 'false';
-    const rawShippingFee = req.body?.shippingFee;
-    const rawClientShippingFee = req.body?.clientShippingFee;
-    const rawDeliveryFee = req.body?.deliveryFee;
-    const clientShippingFee = Number(rawShippingFee);
-    const clientAltFee = Number(rawClientShippingFee);
-    const clientDeliveryFee = Number(rawDeliveryFee);
-    const clientTotalWithShipping = Number(req.body?.totalWithShipping);
+  const rawShippingFee = req.body?.shippingFee;
+  const rawClientShippingFee = req.body?.clientShippingFee;
+  const rawDeliveryFee = req.body?.deliveryFee;
+  const clientShippingFee = Number(rawShippingFee);
+  const clientAltFee = Number(rawClientShippingFee);
+  const clientDeliveryFee = Number(rawDeliveryFee);
+  const clientTotalWithShipping = Number(req.body?.totalWithShipping);
     const clientProvidedValid = allowClientProvided && isFinite(clientShippingFee) && clientShippingFee > 0;
-    const explicitZeroProvided = allowClientProvided && [clientShippingFee, clientAltFee, clientDeliveryFee]
-      .some((v) => Number.isFinite(v) && v === 0);
-    const clientTotalIndicatesFree = !Number.isFinite(clientTotalWithShipping) || clientTotalWithShipping <= totalAmount;
-    const lockFreeShipping = explicitZeroProvided && clientTotalIndicatesFree;
 
-    if (lockFreeShipping) {
-      shippingFee = 0;
-    } else if (clientProvidedValid) {
+    if (clientProvidedValid) {
       shippingFee = clientShippingFee;
     } else if (allowClientProvided && isFinite(clientAltFee) && clientAltFee > 0) {
       // Fallback: some clients send clientShippingFee only
@@ -511,7 +380,7 @@ export const createOrder = async (req, res) => {
       }
     }
 
-    if (!lockFreeShipping && shippingFee === 0) {
+    if (shippingFee === 0) {
       // Attempt to infer from client totalWithShipping if provided
       if (clientTotalWithShipping && clientTotalWithShipping > totalAmount) {
         const inferred = clientTotalWithShipping - totalAmount;
@@ -519,14 +388,14 @@ export const createOrder = async (req, res) => {
       }
     }
 
-    if (!lockFreeShipping && shippingFee === 0) {
+    if (shippingFee === 0) {
       // Final fallback
       const fallback = Number(process.env.DEFAULT_SHIPPING_FEE || 50);
       if (isFinite(fallback) && fallback > 0) shippingFee = fallback;
     }
 
     // Last-chance rescue: if still 0 but any raw positive values were provided, take the maximum raw positive
-    if (!lockFreeShipping && shippingFee === 0) {
+    if (shippingFee === 0) {
       const candidates = [clientShippingFee, clientAltFee, clientDeliveryFee].filter(v => isFinite(v) && v > 0);
       if (candidates.length) {
         shippingFee = Math.max(...candidates);
@@ -536,7 +405,7 @@ export const createOrder = async (req, res) => {
 
   // Final assertion: log before create
   console.log('[ShippingResolution][Final]', { shippingFee, deliveryFeeMirror: shippingFee });
-  if (!lockFreeShipping && shippingFee === 0) {
+  if (shippingFee === 0) {
     const rawPositives = [rawShippingFee, rawClientShippingFee, rawDeliveryFee].map(v => Number(v)).filter(v => isFinite(v) && v > 0);
     if (rawPositives.length) {
       console.warn('[ShippingResolution][Anomaly] Raw positive fee(s) provided but computed/final shippingFee resolved to 0. Raw values:', {
@@ -548,7 +417,7 @@ export const createOrder = async (req, res) => {
     }
   }
   // Absolute final guard: if request body had a positive shippingFee value, force it.
-  if (!lockFreeShipping && shippingFee === 0 && isFinite(Number(rawShippingFee)) && Number(rawShippingFee) > 0) {
+  if (shippingFee === 0 && isFinite(Number(rawShippingFee)) && Number(rawShippingFee) > 0) {
     console.warn('[ShippingResolution][ForceFromRawBody] Forcing shippingFee from raw body value', { rawShippingFee });
     shippingFee = Number(rawShippingFee);
   }
@@ -620,31 +489,9 @@ export const createOrder = async (req, res) => {
     }
 
     // Emit real-time event for new order
-    realTimeEventService.emitNewOrder(savedOrder);
+    try { realTimeEventService.emitNewOrder(savedOrder); } catch (e) { console.warn('Failed to emit new order event:', e?.message || e); }
 
-    // Fire Meta Conversions API Purchase event (server-side)
-    try {
-      const capiResult = await trackPurchase(
-        {
-          ...savedOrder.toObject(),
-          eventId: req.body?.eventId,
-          fbc: req.body?.fbc,
-          fbp: req.body?.fbp,
-          sourceUrl: req.body?.sourceUrl || req.headers?.referer
-        },
-        {
-          ip: req.ip || req.headers?.['x-forwarded-for']?.split(',')[0]?.trim(),
-          userAgent: req.headers?.['user-agent']
-        }
-      );
-      if (capiResult?.success) {
-        console.log('[MetaConversions] Purchase event sent for order:', savedOrder.orderNumber, capiResult.eventId);
-      }
-    } catch (capiErr) {
-      console.warn('[MetaConversions] Failed to send Purchase event (non-fatal):', capiErr);
-    }
-
-    // Fire web push notification targeted to admins (fallback broadcast)
+    // Fire web push notification targeted to admins only
     let webPushSent = 0;
     try {
       const contactEnabled = String(process.env.WHATSAPP_CONTACT_IN_PUSH || 'false').toLowerCase() === 'true';
@@ -668,15 +515,13 @@ export const createOrder = async (req, res) => {
       console.log('[Push][NewOrder][Web] Admin result', adminResult);
       webPushSent = adminResult.sent || 0;
       if (webPushSent === 0) {
-        const allResult = await sendPushToAll(payload);
-        console.log('[Push][NewOrder][Web] Fallback broadcast result', allResult);
-        webPushSent = allResult.sent || 0;
+        console.log('[Push][NewOrder][Web] No admin web push subscriptions available; skipping global fallback broadcast.');
       }
     } catch (pushErr) {
       console.warn('[Push][NewOrder][Web] Failed to send web push', pushErr);
     }
 
-    // Fire Expo (mobile) push notifications to admin devices, fallback to all devices
+    // Fire Expo (mobile) push notifications to admin devices only
     let expoPushSent = 0;
     try {
       const expoEnable = String(process.env.EXPO_PUSH_ON_NEW_ORDER || 'true').toLowerCase() !== 'false';
@@ -698,18 +543,67 @@ export const createOrder = async (req, res) => {
           expoPushSent = adminTokens.length; // assume delivery attempt count
         }
         if (expoPushSent === 0) {
-          // Fallback broadcast to all tokens
-          const allDocs = await MobilePushToken.find({}).lean().select('expoPushToken');
-          const allTokens = allDocs.map(d => d.expoPushToken);
-          if (allTokens.length) {
-            const resultAll = await sendExpoPush({ tokens: allTokens, title, body, data });
-            console.log('[Push][NewOrder][Expo] Fallback all receipts', resultAll);
-            expoPushSent = allTokens.length;
-          }
+          console.log('[Push][NewOrder][Expo] No admin mobile tokens available; skipping global fallback broadcast.');
         }
       }
     } catch (expoErr) {
       console.warn('[Push][NewOrder][Expo] Failed to send expo push', expoErr);
+    }
+
+    // Send order notification only to the order owner (when identifiable as a user account)
+    try {
+      const normalizedEmail = String(savedOrder?.customerInfo?.email || '').trim().toLowerCase();
+      let ownerUser = null;
+
+      if (savedOrder?.user) {
+        ownerUser = await User.findById(savedOrder.user).select('_id role notificationPreferences').lean();
+      }
+
+      if (!ownerUser && normalizedEmail) {
+        ownerUser = await User.findOne({ email: normalizedEmail }).select('_id role notificationPreferences').lean();
+      }
+
+      const ownerCanReceiveOrderUpdates = !!ownerUser
+        && ownerUser.role !== 'admin'
+        && ownerUser.notificationPreferences?.orderUpdates !== false;
+
+      if (ownerCanReceiveOrderUpdates) {
+        const ownerPayload = {
+          title: 'Order Confirmed',
+          body: `Your order ${savedOrder.orderNumber} has been received.`,
+          url: `/my-orders/${savedOrder._id}`,
+          tag: `order-${savedOrder._id}`,
+          requireInteraction: false,
+          icon: '/favicon.svg',
+          badge: '/favicon.svg',
+          silent: false,
+          vibrate: [100, 50, 100]
+        };
+
+        const ownerWebResult = await sendPushToUser(ownerUser._id, ownerPayload);
+        console.log('[Push][OrderOwner][Web] Result', { userId: String(ownerUser._id), ...ownerWebResult });
+
+        const ownerTokenDocs = await MobilePushToken.find({ user: ownerUser._id }).lean().select('expoPushToken');
+        const ownerTokens = ownerTokenDocs.map(d => d.expoPushToken).filter(Boolean);
+        if (ownerTokens.length) {
+          const ownerExpoResult = await sendExpoPush({
+            tokens: ownerTokens,
+            title: 'Order Confirmed',
+            body: `Your order ${savedOrder.orderNumber} has been received.`,
+            data: {
+              type: 'order-owner-update',
+              orderId: savedOrder._id.toString(),
+              orderNumber: savedOrder.orderNumber,
+              status: savedOrder.status
+            }
+          });
+          console.log('[Push][OrderOwner][Expo] Result', { userId: String(ownerUser._id), attempts: ownerTokens.length, ownerExpoResult });
+        }
+      } else {
+        console.log('[Push][OrderOwner] Skipped (no eligible owner user found or orderUpdates disabled).');
+      }
+    } catch (ownerPushErr) {
+      console.warn('[Push][OrderOwner] Failed to send owner notification', ownerPushErr);
     }
 
     // If no push delivered across both channels, generate WhatsApp manual notification links (internal logging only)
@@ -838,49 +732,22 @@ export const createOrder = async (req, res) => {
         })()
       }
     });
-    return;
-    } catch (error) {
-      // Ensure transaction is aborted if still active
-      if (session.inTransaction()) {
-        await session.abortTransaction();
-      }
-
-      if (isWriteConflict(error) && attempt < maxRetries) {
-        const delay = 50 * (attempt + 1);
-        console.warn('[createOrder] Write conflict, retrying', { attempt: attempt + 1, delay });
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        continue;
-      }
-
-      console.error('Error creating order:', error);
-      const statusFromError = Number(error?.statusCode || error?.status || 0);
-
-      if (statusFromError >= 400 && statusFromError < 500) {
-        res.status(statusFromError).json({ message: error?.message || 'Request failed' });
-      } else if (error?.name === 'ValidationError') {
-        const first = Object.values(error.errors || {})[0];
-        const validationMessage = first?.message || error?.message || 'Validation failed';
-        res.status(400).json({ message: validationMessage });
-      } else if (error?.name === 'CastError') {
-        res.status(400).json({ message: error?.message || 'Invalid request payload' });
-      } else {
-        const message = error?.message || 'Failed to create order';
-        res.status(500).json({
-          message,
-          error: message
-        });
-      }
-      return;
-    } finally {
-      // End the session
-      await session.endSession();
+  } catch (error) {
+    // Ensure transaction is aborted if still active
+    if (session.inTransaction()) {
+      await session.abortTransaction();
     }
-  }
 
-  res.status(500).json({
-    message: 'Failed to create order after retries',
-    error: 'Write conflict retries exceeded'
-  });
+    console.error('Error creating order:', error);
+    const message = error?.message || 'Failed to create order';
+    res.status(500).json({
+      message,
+      error: message
+    });
+  } finally {
+    // End the session
+    await session.endSession();
+  }
 };
 
 // Get user orders
@@ -965,14 +832,71 @@ export const getOrderPublic = async (req, res) => {
 export const updateOrderStatus = async (req, res) => {
   try {
     const { status } = req.body || {};
-    if (!validateOrderStatusPayload(status, res)) return;
-    const order = mongoose.isValidObjectId(req.params.id)
-      ? await Order.findById(req.params.id)
-      : await Order.findOne({ orderNumber: String(req.params.id || '').trim() });
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid order id' });
+    }
+
+    const allowedStatuses = Order.schema.path('status')?.enumValues || [];
+    if (typeof status !== 'string' || !allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        message: 'Invalid order status',
+        allowedStatuses
+      });
+    }
+
+    // Find the order first to check previous status
+    const order = await Order.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
     }
-    await applyOrderStatusUpdate(order, status, req.user?._id || null);
+    const prevStatus = order.status;
+
+    if (prevStatus === status) {
+      return res.json({
+        message: 'Order status updated successfully',
+        order
+      });
+    }
+
+    // Persist only the status field so legacy orders with unrelated invalid fields do not fail.
+    await Order.updateOne(
+      { _id: order._id },
+      { $set: { status } },
+      { runValidators: true }
+    );
+    order.status = status;
+
+    // Inventory configuration driven stock adjustments
+    let invCfg = null;
+    try { invCfg = (await Settings.findOne())?.inventory || null; } catch {}
+    const hasCfg = invCfg && (Object.prototype.hasOwnProperty.call(invCfg, 'reserveOnCheckout') || Object.prototype.hasOwnProperty.call(invCfg, 'autoDecrementOnOrder'));
+    const decrementedAtOrder = hasCfg ? !!(invCfg?.reserveOnCheckout || invCfg?.autoDecrementOnOrder) : true;
+    const shouldDecrementOnDelivery = !decrementedAtOrder;
+
+    // Build items array in variant-aware form
+    const asInventoryItems = (items) => items.map(it => ({
+      product: it.product,
+      quantity: it.quantity,
+      ...(it.variantId ? { variantId: it.variantId } : { size: it.size, color: it.color })
+    }));
+
+    // Auto-decrement when delivered if not already decremented earlier
+    if ((status === 'delivered' || status === 'fulfilled') && prevStatus !== status && shouldDecrementOnDelivery) {
+      try { await inventoryService.reserveItems(asInventoryItems(order.items), req.user?._id || null); } catch (e) { console.warn('Delivery decrement failed:', e?.message || e); }
+    }
+
+    // Auto-increment on cancel if it was decremented earlier
+    if (status === 'cancelled' && prevStatus !== status && invCfg?.autoIncrementOnCancel && decrementedAtOrder) {
+      try { await inventoryService.incrementItems(asInventoryItems(order.items), req.user?._id || null, 'Order cancelled'); } catch (e) { console.warn('Cancel increment failed:', e?.message || e); }
+    }
+
+    // Auto-increment on returned
+    if (status === 'returned' && prevStatus !== status && invCfg?.autoIncrementOnReturn) {
+      try { await inventoryService.incrementItems(asInventoryItems(order.items), req.user?._id || null, 'Order returned'); } catch (e) { console.warn('Return increment failed:', e?.message || e); }
+    }
+
+    // Emit real-time event for order update
+    try { realTimeEventService.emitOrderUpdate(order); } catch (e) { console.warn('Failed to emit order update event:', e?.message || e); }
 
     res.json({
       message: 'Order status updated successfully',
@@ -980,84 +904,7 @@ export const updateOrderStatus = async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating order status:', error);
-    res.status(500).json({ message: 'Failed to update order status' });
-  }
-};
-
-export const updateOrderStatusByNumber = async (req, res) => {
-  try {
-    const orderNumber = String(req.body?.orderNumber || '').trim();
-    const status = req.body?.status;
-    if (!orderNumber) {
-      return res.status(400).json({ message: 'Order number is required' });
-    }
-    if (!validateOrderStatusPayload(status, res)) return;
-
-    const order = await Order.findOne({ orderNumber });
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
-
-    await applyOrderStatusUpdate(order, status, req.user?._id || null);
-
-    res.json({
-      message: 'Order status updated successfully',
-      order
-    });
-  } catch (error) {
-    console.error('Error updating order status by number:', error);
-    res.status(500).json({ message: 'Failed to update order status' });
-  }
-};
-
-// Delete order (admin) with optional inventory restock (default true)
-export const deleteOrder = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const restock = String(req.query?.restock ?? 'true').toLowerCase() !== 'false';
-
-    const order = await Order.findById(id);
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
-
-    let restocked = false;
-    let restockError = null;
-
-    if (restock) {
-      let invCfg = null;
-      try { invCfg = (await Settings.findOne())?.inventory || null; } catch {}
-      const hasCfg = invCfg && (Object.prototype.hasOwnProperty.call(invCfg, 'reserveOnCheckout') || Object.prototype.hasOwnProperty.call(invCfg, 'autoDecrementOnOrder'));
-      const decrementedAtOrder = hasCfg ? !!(invCfg?.reserveOnCheckout || invCfg?.autoDecrementOnOrder) : true;
-
-      if (decrementedAtOrder) {
-        const items = order.items.map(it => ({
-          product: it.product,
-          quantity: it.quantity,
-          ...(it.variantId ? { variantId: it.variantId } : { size: it.size, color: it.color })
-        }));
-
-        try {
-          await inventoryService.incrementItems(items, req.user?._id || null, 'Order deleted');
-          restocked = true;
-        } catch (e) {
-          restockError = e?.message || String(e);
-          try { console.warn('Failed to restock items on delete:', restockError); } catch {}
-        }
-      }
-    }
-
-    await order.deleteOne();
-    try { realTimeEventService.emitOrderUpdate(order); } catch {}
-
-    res.json({
-      message: 'Order deleted',
-      restocked,
-      ...(restockError ? { restockError } : {})
-    });
-  } catch (error) {
-    console.error('Error deleting order:', error);
-    res.status(500).json({ message: 'Failed to delete order' });
+    res.status(500).json({ message: 'Failed to update order status', error: error?.message });
   }
 };
 

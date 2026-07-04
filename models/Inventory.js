@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const inventorySchema = new mongoose.Schema({
   product: {
@@ -62,13 +63,13 @@ const inventorySchema = new mongoose.Schema({
 // Indexes
 // 1) Unique per product+variant+warehouse when variantId is set
 inventorySchema.index(
-  { product: 1, variantId: 1, warehouse: 1 },
+  { tenantId: 1, product: 1, variantId: 1, warehouse: 1 },
   // Use $exists:true for broad compatibility (avoid $type in partial indexes on older MongoDB)
   { unique: true, partialFilterExpression: { variantId: { $exists: true } } }
 );
 // 2) Backward-compat: unique per product+size+color+warehouse when variantId is NOT set
 inventorySchema.index(
-  { product: 1, size: 1, color: 1, warehouse: 1 },
+  { tenantId: 1, product: 1, size: 1, color: 1, warehouse: 1 },
   // Use equality-to-null which matches both null and non-existent fields; $exists:false may not be supported in partial indexes on some MongoDB versions
   { unique: true, partialFilterExpression: { variantId: null } }
 );
@@ -85,5 +86,7 @@ inventorySchema.pre('save', function(next) {
   this.lastUpdated = new Date();
   next();
 });
+
+inventorySchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Inventory', inventorySchema);

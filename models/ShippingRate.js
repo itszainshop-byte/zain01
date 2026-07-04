@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const shippingRateSchema = new mongoose.Schema({
   zone: {
@@ -173,5 +174,7 @@ shippingRateSchema.statics.findByCity = function(cityName, zoneIds = []) {
   }
   return this.find(query).populate('zone');
 };
+
+shippingRateSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('ShippingRate', shippingRateSchema);

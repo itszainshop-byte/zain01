@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const pushOpenSchema = new mongoose.Schema({
   nid: { type: String, required: true, index: true },
@@ -8,6 +9,8 @@ const pushOpenSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 pushOpenSchema.index({ openedAt: -1 });
+
+pushOpenSchema.plugin(tenantScopedModel);
 
 const PushOpen = mongoose.model('PushOpen', pushOpenSchema);
 export default PushOpen;

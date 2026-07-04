@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const orderSchema = new mongoose.Schema({
   orderNumber: {
     type: String,
-    required: true,
-    unique: true
+    required: true
   },
   user: {
     type: mongoose.Schema.Types.ObjectId,
@@ -77,10 +77,7 @@ const orderSchema = new mongoose.Schema({
     country: {
       type: String,
       required: true,
-      uppercase: true,
-      trim: true,
-      minlength: 2,
-      maxlength: 64
+      enum: ['JO', 'SA', 'AE', 'KW', 'QA', 'BH', 'OM', 'EG', 'IQ', 'LB', 'PS']
     }
   },
   customerInfo: {
@@ -267,7 +264,7 @@ orderSchema.pre('save', function(next) {
 });
 
 // Add index for orderNumber
-orderSchema.index({ orderNumber: 1 }, { unique: true });
+orderSchema.index({ tenantId: 1, orderNumber: 1 }, { unique: true });
 
 // Add index for user to optimize queries
 orderSchema.index({ user: 1 });
@@ -284,5 +281,7 @@ orderSchema.index({ deliveryStatus: 1 });
 orderSchema.index({ deliveryTrackingNumber: 1 });
 orderSchema.index({ deliveryCompany: 1, deliveryStatus: 1 });
 orderSchema.index({ deliveryAssignedAt: -1 });
+
+orderSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Order', orderSchema);

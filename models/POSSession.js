@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const posSessionSchema = new mongoose.Schema({
   register: {
@@ -104,5 +105,7 @@ posSessionSchema.virtual('duration').get(function() {
 posSessionSchema.virtual('netSales').get(function() {
   return this.totalSales - this.totalRefunds;
 });
+
+posSessionSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('POSSession', posSessionSchema);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const pageLayoutSchema = new mongoose.Schema({
   sections: {
@@ -42,6 +43,8 @@ pageLayoutSchema.statics.getOrCreate = async function() {
 
   return doc;
 };
+
+pageLayoutSchema.plugin(tenantScopedModel);
 
 const PageLayout = mongoose.model('PageLayout', pageLayoutSchema);
 

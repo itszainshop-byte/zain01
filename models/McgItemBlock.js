@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const mcgItemBlockSchema = new mongoose.Schema({
   barcode: { type: String, trim: true },
@@ -21,7 +22,7 @@ mcgItemBlockSchema.pre('validate', function(next) {
 });
 
 mcgItemBlockSchema.index(
-  { barcode: 1 },
+  { tenantId: 1, barcode: 1 },
   {
     unique: true,
     partialFilterExpression: { barcode: { $type: 'string', $ne: '' } }
@@ -29,11 +30,13 @@ mcgItemBlockSchema.index(
 );
 
 mcgItemBlockSchema.index(
-  { mcgItemId: 1 },
+  { tenantId: 1, mcgItemId: 1 },
   {
     unique: true,
     partialFilterExpression: { mcgItemId: { $type: 'string', $ne: '' } }
   }
 );
+
+mcgItemBlockSchema.plugin(tenantScopedModel);
 
 export default mongoose.models.McgItemBlock || mongoose.model('McgItemBlock', mcgItemBlockSchema);

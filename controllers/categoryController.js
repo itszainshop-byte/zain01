@@ -234,7 +234,8 @@ export const createCategory = async (req, res) => {
     const payload = {
       ...req.body,
       name: req.body.name.trim(),
-      route: normalizeRouteValue(req.body.route)
+      route: normalizeRouteValue(req.body.route),
+      mobileRoute: normalizeRouteValue(req.body.mobileRoute)
     };
     // Validate parent if provided
     if (payload.parent) {
@@ -287,6 +288,9 @@ export const updateCategory = async (req, res) => {
     const updatePayload = { ...req.body, name: req.body.name?.trim() };
     if (updatePayload.route !== undefined) {
       updatePayload.route = normalizeRouteValue(updatePayload.route);
+    }
+    if (updatePayload.mobileRoute !== undefined) {
+      updatePayload.mobileRoute = normalizeRouteValue(updatePayload.mobileRoute);
     }
     if (updatePayload.parent !== undefined) {
       if (!updatePayload.parent) {

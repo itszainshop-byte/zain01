@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const legalPageViewSchema = new mongoose.Schema({
   page: { type: String, enum: ['privacy', 'terms'], required: true },
@@ -13,5 +14,7 @@ const legalPageViewSchema = new mongoose.Schema({
 // Indexes for efficient filtering & sorting
 legalPageViewSchema.index({ page: 1, createdAt: -1 });
 legalPageViewSchema.index({ createdAt: -1 });
+
+legalPageViewSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('LegalPageView', legalPageViewSchema);

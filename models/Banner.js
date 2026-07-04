@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const bannerSchema = new mongoose.Schema({
   title: {
@@ -83,5 +84,7 @@ const bannerSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+bannerSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Banner', bannerSchema);

@@ -1,6 +1,38 @@
 import cloudinary from '../services/cloudinaryClient.js';
 import { ensureCloudinaryConfig, cloudinarySettingsDiagnostics } from '../services/cloudinaryConfigService.js';
 
+function classifyCloudinaryApiError(rawMsg = '') {
+  const message = String(rawMsg || 'unknown_error');
+  if (/disabled\s+customer|account\s+disabled|suspended/i.test(message)) {
+    return {
+      status: 403,
+      payload: {
+        message: 'Cloudinary account is disabled. Re-enable the account or update credentials to an active Cloudinary product environment.',
+        code: 'cloudinary_account_disabled',
+        detail: message
+      }
+    };
+  }
+  if (/api_key|signature|authorization|not allowed|invalid/i.test(message)) {
+    return {
+      status: 400,
+      payload: {
+        message: 'Cloudinary authentication failed. Verify cloud name, API key, and API secret.',
+        code: 'cloudinary_auth_failed',
+        detail: message
+      }
+    };
+  }
+  return {
+    status: 502,
+    payload: {
+      message: 'Failed to fetch resources from Cloudinary',
+      code: 'cloudinary_api_error',
+      detail: message
+    }
+  };
+}
+
 // List resources with optional folder, type, and pagination
 export const listResources = async (req, res) => {
   try {
@@ -28,22 +60,10 @@ export const listResources = async (req, res) => {
     try {
       result = await cloudinary.api.resources(options);
     } catch (apiErr) {
-      // Common Cloudinary API failure patterns - attempt to surface clearer messages
       const rawMsg = apiErr?.error?.message || apiErr?.message || 'unknown_error';
       console.error('[cloudinary][listResources] Cloudinary API error:', rawMsg, { options });
-      // Auth errors often include phrases like 'Missing required parameter - api_key' or 'Invalid Signature'
-      if (/api_key|signature|authorization|not allowed/i.test(rawMsg)) {
-        return res.status(400).json({
-          message: 'Cloudinary authentication failed. Verify cloud name, API key, and API secret.',
-          code: 'cloudinary_auth_failed',
-          detail: rawMsg
-        });
-      }
-      return res.status(502).json({
-        message: 'Failed to fetch resources from Cloudinary',
-        code: 'cloudinary_api_error',
-        detail: rawMsg
-      });
+      const classified = classifyCloudinaryApiError(rawMsg);
+      return res.status(classified.status).json(classified.payload);
     }
     return res.json(result);
   } catch (err) {
@@ -127,8 +147,20 @@ export const health = async (req, res) => {
       return res.json({ ok: true, status: 'ok', timestamp, sampleCount: Array.isArray(sample?.resources) ? sample.resources.length : 0, diag });
     } catch (apiErr) {
       const msg = apiErr?.error?.message || apiErr?.message || 'cloudinary_api_error';
-      const authLike = /api_key|signature|authorization|not allowed|invalid/i.test(msg);
-      return res.status(authLike ? 400 : 502).json({ ok: false, status: authLike ? 'auth_failed' : 'api_error', message: msg, timestamp, diag });
+      const classified = classifyCloudinaryApiError(msg);
+      const statusByCode = {
+        cloudinary_auth_failed: 'auth_failed',
+        cloudinary_account_disabled: 'account_disabled',
+        cloudinary_api_error: 'api_error'
+      };
+      return res.status(classified.status).json({
+        ok: false,
+        status: statusByCode[classified.payload.code] || 'api_error',
+        message: classified.payload.detail || classified.payload.message,
+        code: classified.payload.code,
+        timestamp,
+        diag
+      });
     }
   } catch (err) {
     return res.status(500).json({ ok: false, status: 'error', message: err?.message || 'unknown_error', timestamp });

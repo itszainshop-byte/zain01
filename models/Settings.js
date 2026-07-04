@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const settingsSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
-    default: 'zain'
+    default: 'Eva Curves Fashion Store'
   },
   email: {
     type: String,
@@ -123,7 +124,6 @@ const settingsSchema = new mongoose.Schema({
   navPanelColumnActiveBgColor: { type: String, default: '' },
   navPanelAccentColor: { type: String, default: '' },
   navPanelHeaderColor: { type: String, default: '' },
-  navLinksInlineWhenNoCategory: { type: Boolean, default: false },
   fontFamily: {
     type: String,
     default: 'Inter, system-ui, sans-serif'
@@ -294,7 +294,6 @@ const settingsSchema = new mongoose.Schema({
     }
   },
   // Product listing filter visibility toggles
-  showFilterBar: { type: Boolean, default: true }, // allow hiding entire filter sidebar/button
   showColorFilter: { type: Boolean, default: true }, // allow hiding color facet from storefront
   
   // Social media links
@@ -311,7 +310,7 @@ const settingsSchema = new mongoose.Schema({
   // SEO settings
   siteTitle: {
     type: String,
-    default: 'zain'
+    default: 'Eva Curves Fashion Store'
   },
   siteDescription: {
     type: String,
@@ -324,18 +323,50 @@ const settingsSchema = new mongoose.Schema({
   // Analytics
   facebookPixel: {
     pixelId: { type: String, default: '' },
-    enabled: { type: Boolean, default: false },
-    // Meta Conversions API (server-side events)
-    conversionsApiEnabled: { type: Boolean, default: false },
-    conversionsAccessToken: { type: String, default: '' }, // System user access token
-    testEventCode: { type: String, default: '' } // Optional: for testing in Events Manager
+    enabled: { type: Boolean, default: false }
   },
   googleAnalytics: {
     trackingId: { type: String, default: '' },
     enabled: { type: Boolean, default: false }
   },
   visitorPopup: {
+    id: { type: String, default: 'default' },
+    name: { type: String, default: 'Default Campaign' },
     enabled: { type: Boolean, default: false },
+    fullScreenMode: { type: Boolean, default: false },
+    platform: { type: String, enum: ['web', 'mobile', 'both'], default: 'both' },
+    activeRecordId: { type: String, default: 'default' },
+    activeRecordName: { type: String, default: 'Default Campaign' },
+    records: [{
+      id: { type: String, required: true },
+      name: { type: String, default: 'Campaign' },
+      enabled: { type: Boolean, default: false },
+      fullScreenMode: { type: Boolean, default: false },
+      platform: { type: String, enum: ['web', 'mobile', 'both'], default: 'both' },
+      showOnScroll: { type: Boolean, default: true },
+      showExitIntent: { type: Boolean, default: true },
+      scrollThreshold: { type: Number, default: 360, min: 0, max: 4000 },
+      frequencyDays: { type: Number, default: 7, min: 1, max: 30 },
+      heading: { type: String, default: 'Register & get 10% OFF' },
+      bodyAr: { type: String },
+      bodyHe: { type: String },
+      bodyEn: { type: String },
+      ctaLabel: { type: String, default: 'Register now' },
+      ctaHref: { type: String, default: '/register' },
+      couponCode: { type: String, default: '' },
+      couponNote: { type: String, default: '* Coupon applied automatically after you finish registering.' },
+      pixelEventBase: { type: String, default: 'VisitorPopup' },
+      accentColor: { type: String },
+      textColor: { type: String },
+      backgroundColor: { type: String },
+      backgroundImage: { type: String, default: '' },
+      headingColor: { type: String },
+      bodyColor: { type: String },
+      headingFontSize: { type: Number, default: 32 },
+      bodyFontSize: { type: Number, default: 16 },
+      ctaFontSize: { type: Number, default: 18 },
+      metaFontSize: { type: Number, default: 12 }
+    }],
     showOnScroll: { type: Boolean, default: true },
     showExitIntent: { type: Boolean, default: true },
     scrollThreshold: { type: Number, default: 360, min: 0, max: 4000 },
@@ -365,7 +396,6 @@ const settingsSchema = new mongoose.Schema({
   scrollTopTextColor: { type: String, default: '' },
   scrollTopHoverBgColor: { type: String, default: '' },
   scrollTopPingColor: { type: String, default: '' },
-  scrollTopBackgroundImage: { type: String, default: '' },
   // Add To Cart button theme (persist so guests see admin design)
   atcBgColor: { type: String, default: '' },
   atcTextColor: { type: String, default: '' },
@@ -391,6 +421,12 @@ const settingsSchema = new mongoose.Schema({
     appSecret: { type: String, default: '' },
     // Graph API version, optional (e.g., 'v19.0'). If empty, SDK default is used
     graphVersion: { type: String, default: '' }
+  },
+  // Apple Sign In configuration (admin managed, non-secret)
+  appleAuth: {
+    enabled: { type: Boolean, default: false },
+    // Service ID (web) or Bundle ID (native) expected in Apple identity token audience
+    clientId: { type: String, default: '' }
   }
 }, {
   timestamps: true
@@ -421,7 +457,8 @@ settingsSchema.add({
     autoIncrementOnReturn: { type: Boolean, default: true },
     allowNegativeStock: { type: Boolean, default: false },
     reserveOnCheckout: { type: Boolean, default: true },
-    reservationTTLMinutes: { type: Number, default: 15, min: 1, max: 1440 }
+    reservationTTLMinutes: { type: Number, default: 15, min: 1, max: 1440 },
+    lowStockThreshold: { type: Number, default: 5, min: 1, max: 100000 }
   }
 });
 
@@ -561,19 +598,13 @@ settingsSchema.add({
 // Checkout form customization (admin configurable)
 settingsSchema.add({
   checkoutForm: {
-    // Visibility toggles (admin configurable)
-    showFirstName: { type: Boolean, default: true },
     showEmail: { type: Boolean, default: false },
     showLastName: { type: Boolean, default: false },
-    showMobile: { type: Boolean, default: true },
     // Allow users to proceed to checkout without authentication
     allowGuestCheckout: { type: Boolean, default: true },
-    // Additional toggles for optional fields
+    // Future toggles (currently not rendered in UI):
     showSecondaryMobile: { type: Boolean, default: false },
-    showAddress: { type: Boolean, default: true },
-    showCity: { type: Boolean, default: true },
     showCountry: { type: Boolean, default: false },
-    allowOtherCity: { type: Boolean, default: true },
     // Structured multilingual city labels (editable from admin UI)
     cityTable: [{
       ar: { type: String, default: '' },
@@ -849,21 +880,7 @@ settingsSchema.add({
         'כפר סבא'
       ]
     },
-    // Checkout reminder message template for abandoned checkouts
-    reminderMessageTemplate: { type: String, default: '' },
-    reminderCheckoutUrl: { type: String, default: '' },
-    reminderDiscountCode: { type: String, default: '' },
-    // WhatsApp reminder delivery (Meta Cloud API)
-    reminderWhatsAppEnabled: { type: Boolean, default: false },
-    metaAccessToken: { type: String, default: '' },
-    metaPhoneNumberId: { type: String, default: '' },
-    metaVerifyToken: { type: String, default: '' },
-    metaTemplateName: { type: String, default: '' },
-    metaTemplateLanguage: { type: String, default: 'he' },
-    twilioAccountSid: { type: String, default: '' },
-    twilioAuthToken: { type: String, default: '' },
-    twilioWhatsAppFrom: { type: String, default: '' },
-    twilioMessagingServiceSid: { type: String, default: '' }
+    allowOtherCity: { type: Boolean, default: true }
   }
 });
 
@@ -909,39 +926,6 @@ settingsSchema.add({
       hideItemList: { type: Boolean, default: false },
       emailBcc: { type: String, default: '' },
       defaultDiscount: { type: Number, default: 0, min: 0 }
-    },
-    // Meshulam (Grow) Light API integration
-    meshulam: {
-      enabled: { type: Boolean, default: true },
-      // Create payment process URL
-      apiUrl: { type: String, default: 'https://sandbox.meshulam.co.il/api/light/server/1.0/createPaymentProcess' },
-      // Approve transaction URL
-      approveUrl: { type: String, default: 'https://sandbox.meshulam.co.il/api/light/server/1.0/approveTransaction' },
-      // Grow sandbox defaults from provided merchant
-      pageCode: { type: String, default: '76195ea4fc1a' },
-      userId: { type: String, default: '4d405ec9bd740efd' },
-      apiKey: { type: String, default: '' },
-      successUrl: { type: String, default: '' },
-      cancelUrl: { type: String, default: '' },
-      notifyUrl: { type: String, default: '' },
-      allowInsecureRedirects: { type: Boolean, default: false }
-    },
-    // Hyp Pay hosted page (APISign) integration
-    hypay: {
-      enabled: { type: Boolean, default: false },
-      masof: { type: String, default: '' },
-      apiKey: { type: String, default: '' },
-      passp: { type: String, default: '' },
-      info: { type: String, default: 'Online order' },
-      pageLang: { type: String, enum: ['HEB', 'ENG', ''], default: '' },
-      template: { type: String, default: '' },
-      tash: { type: Number, default: 0, min: 0 },
-      fixTash: { type: Boolean, default: false },
-      tashType: { type: String, enum: ['1', '6', ''], default: '' },
-      hideButtons: { type: Boolean, default: false },
-      moreData: { type: Boolean, default: true },
-      successUrl: { type: String, default: '' },
-      failureUrl: { type: String, default: '' }
     },
     // Visibility / availability flags for each checkout payment option
     visibility: {
@@ -994,10 +978,6 @@ settingsSchema.statics.createDefaultSettings = async function() {
         updateData.productGridStyle = 'standard';
         needsUpdate = true;
       }
-      if (typeof settings.showFilterBar === 'undefined') {
-        updateData.showFilterBar = true;
-        needsUpdate = true;
-      }
       if (typeof settings.showColorFilter === 'undefined') {
         updateData.showColorFilter = true;
         needsUpdate = true;
@@ -1010,14 +990,12 @@ settingsSchema.statics.createDefaultSettings = async function() {
       ensureField('navPanelColumnActiveBgColor', '');
       ensureField('navPanelAccentColor', '');
       ensureField('navPanelHeaderColor', '');
-      ensureField('navLinksInlineWhenNoCategory', false);
   ensureField('searchBorderColor', '');
   // Ensure scroll-to-top fields exist
   ensureField('scrollTopBgColor', '');
   ensureField('scrollTopTextColor', '');
   ensureField('scrollTopHoverBgColor', '');
   ensureField('scrollTopPingColor', '');
-  ensureField('scrollTopBackgroundImage', '');
       if (!settings.productCardStyle) {
         updateData.productCardStyle = 'modern';
         needsUpdate = true;
@@ -1116,34 +1094,6 @@ settingsSchema.statics.createDefaultSettings = async function() {
             emailBcc: '',
             defaultDiscount: 0
           },
-          meshulam: {
-            enabled: true,
-            apiUrl: 'https://sandbox.meshulam.co.il/api/light/server/1.0/createPaymentProcess',
-            approveUrl: 'https://sandbox.meshulam.co.il/api/light/server/1.0/approveTransaction',
-            pageCode: '76195ea4fc1a',
-            userId: '4d405ec9bd740efd',
-            apiKey: '',
-            successUrl: '',
-            cancelUrl: '',
-            notifyUrl: '',
-            allowInsecureRedirects: false
-          },
-          hypay: {
-            enabled: false,
-            masof: '',
-            apiKey: '',
-            passp: '',
-            info: 'Online order',
-            pageLang: '',
-            template: '',
-            tash: 0,
-            fixTash: false,
-            tashType: '',
-            hideButtons: false,
-            moreData: true,
-            successUrl: '',
-            failureUrl: ''
-          },
           visibility: {
             card: true,
             cod: true,
@@ -1187,48 +1137,6 @@ settingsSchema.statics.createDefaultSettings = async function() {
         };
         needsUpdate = true;
       }
-      // Ensure payments.hypay exists if payments existed previously
-      if (settings.payments && !settings.payments.hypay) {
-        updateData.payments = {
-          ...(updateData.payments || settings.payments),
-          hypay: {
-            enabled: false,
-            masof: '',
-            apiKey: '',
-            passp: '',
-            info: 'Online order',
-            pageLang: '',
-            template: '',
-            tash: 0,
-            fixTash: false,
-            tashType: '',
-            hideButtons: false,
-            moreData: true,
-            successUrl: '',
-            failureUrl: ''
-          }
-        };
-        needsUpdate = true;
-      }
-      // Ensure payments.meshulam exists if payments existed previously
-      if (settings.payments && !settings.payments.meshulam) {
-        updateData.payments = {
-          ...(updateData.payments || settings.payments),
-          meshulam: {
-            enabled: true,
-            apiUrl: 'https://sandbox.meshulam.co.il/api/light/server/1.0/createPaymentProcess',
-            approveUrl: 'https://sandbox.meshulam.co.il/api/light/server/1.0/approveTransaction',
-            pageCode: '76195ea4fc1a',
-            userId: '4d405ec9bd740efd',
-            apiKey: '',
-            successUrl: '',
-            cancelUrl: '',
-            notifyUrl: '',
-            allowInsecureRedirects: false
-          }
-        };
-        needsUpdate = true;
-      }
       // Ensure googleAuth exists
       if (!settings.googleAuth) {
         updateData.googleAuth = { enabled: false, clientId: '' };
@@ -1237,6 +1145,11 @@ settingsSchema.statics.createDefaultSettings = async function() {
       // Ensure facebookAuth exists
       if (!settings.facebookAuth) {
         updateData.facebookAuth = { enabled: false, appId: '', appSecret: '', graphVersion: '' };
+        needsUpdate = true;
+      }
+      // Ensure appleAuth exists
+      if (!settings.appleAuth) {
+        updateData.appleAuth = { enabled: false, clientId: '' };
         needsUpdate = true;
       }
 
@@ -1254,6 +1167,7 @@ settingsSchema.statics.createDefaultSettings = async function() {
         const legacyMarkers = ['Jerusalem', 'Ramallah', 'Nablus', 'Hebron'];
         const shouldMigrateCities = !settings.checkoutForm ||
           !Array.isArray(settings.checkoutForm.cities) ||
+          settings.checkoutForm.cities.length === 0 ||
           settings.checkoutForm.cities.some(c => legacyMarkers.includes(String(c)));
         if (shouldMigrateCities) {
           const newCities = [
@@ -1263,13 +1177,9 @@ settingsSchema.statics.createDefaultSettings = async function() {
             ...(settings.checkoutForm || {}),
             cities: newCities,
             allowOtherCity: typeof settings.checkoutForm?.allowOtherCity === 'boolean' ? settings.checkoutForm.allowOtherCity : true,
-            showFirstName: typeof settings.checkoutForm?.showFirstName === 'boolean' ? settings.checkoutForm.showFirstName : true,
             showEmail: !!settings.checkoutForm?.showEmail,
             showLastName: !!settings.checkoutForm?.showLastName,
-            showMobile: typeof settings.checkoutForm?.showMobile === 'boolean' ? settings.checkoutForm.showMobile : true,
             showSecondaryMobile: !!settings.checkoutForm?.showSecondaryMobile,
-            showAddress: typeof settings.checkoutForm?.showAddress === 'boolean' ? settings.checkoutForm.showAddress : true,
-            showCity: typeof settings.checkoutForm?.showCity === 'boolean' ? settings.checkoutForm.showCity : true,
             showCountry: !!settings.checkoutForm?.showCountry
           };
           needsUpdate = true;
@@ -1321,6 +1231,8 @@ settingsSchema.statics.createDefaultSettings = async function() {
     console.error('Error creating/migrating settings:', error);
   }
 };
+
+settingsSchema.plugin(tenantScopedModel);
 
 const Settings = mongoose.model('Settings', settingsSchema);
 

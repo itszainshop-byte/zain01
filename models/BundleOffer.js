@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const bundleProductSchema = new mongoose.Schema({
   product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -29,5 +30,7 @@ const bundleOfferSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 bundleOfferSchema.index({ active: 1, startDate: 1, endDate: 1 });
+
+bundleOfferSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('BundleOffer', bundleOfferSchema);

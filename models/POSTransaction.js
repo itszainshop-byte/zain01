@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const posTransactionSchema = new mongoose.Schema({
   transactionNumber: {
     type: String,
-    required: true,
-    unique: true
+    required: true
   },
   session: {
     type: mongoose.Schema.Types.ObjectId,
@@ -177,7 +177,7 @@ const posTransactionSchema = new mongoose.Schema({
 posTransactionSchema.index({ session: 1, createdAt: -1 });
 posTransactionSchema.index({ register: 1, createdAt: -1 });
 posTransactionSchema.index({ cashier: 1, createdAt: -1 });
-posTransactionSchema.index({ transactionNumber: 1 }, { unique: true });
+posTransactionSchema.index({ tenantId: 1, transactionNumber: 1 }, { unique: true });
 posTransactionSchema.index({ receiptNumber: 1 });
 posTransactionSchema.index({ type: 1, status: 1 });
 posTransactionSchema.index({ customer: 1 });
@@ -212,5 +212,7 @@ posTransactionSchema.virtual('netAmount').get(function() {
   }
   return this.total;
 });
+
+posTransactionSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('POSTransaction', posTransactionSchema);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const warehouseMovementSchema = new mongoose.Schema({
   product: {
@@ -44,5 +45,7 @@ const warehouseMovementSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+warehouseMovementSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('WarehouseMovement', warehouseMovementSchema);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const recipientSchema = new mongoose.Schema({
   firstName: {
@@ -43,6 +44,9 @@ const recipientSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+recipientSchema.index({ tenantId: 1, email: 1, mobile: 1 }, { unique: true });
+recipientSchema.plugin(tenantScopedModel);
 
 const Recipient = mongoose.model('Recipient', recipientSchema);
 export default Recipient;

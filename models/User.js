@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { normalizePhoneE164ish } from '../utils/phone.js';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const userSchema = new mongoose.Schema({
   name: {
@@ -11,7 +12,6 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: [true, 'Email is required'],
-    unique: true,
     trim: true,
     lowercase: true,
     match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email']
@@ -19,7 +19,7 @@ const userSchema = new mongoose.Schema({
   // OAuth provider (e.g., 'google') or 'local'
   provider: {
     type: String,
-    enum: ['local', 'google'],
+    enum: ['local', 'google', 'facebook', 'apple'],
     default: 'local',
     index: true
   },
@@ -27,16 +27,56 @@ const userSchema = new mongoose.Schema({
   googleId: {
     type: String,
     index: true,
-    sparse: true,
-    unique: true
+    sparse: true
+  },
+  // Facebook OAuth user identifier
+  facebookId: {
+    type: String,
+    index: true,
+    sparse: true
+  },
+  // Apple Sign In subject identifier
+  appleId: {
+    type: String,
+    index: true,
+    sparse: true
   },
   // Optional phone number for WhatsApp / SMS (E.164 format preferred e.g. +15551234567)
   phoneNumber: {
     type: String,
     trim: true,
-    unique: true,
     sparse: true, // Allow many users without phone numbers
     match: [/^\+?[1-9]\d{6,15}$/, 'Invalid phone number format']
+  },
+  addressLine1: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  addressLine2: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  city: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  state: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  postalCode: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  country: {
+    type: String,
+    trim: true,
+    default: ''
   },
   password: {
     type: String,
@@ -49,7 +89,7 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['user', 'admin'],
+    enum: ['user', 'admin', 'super_admin'],
     default: 'user'
   },
   whatsappOptIn: {
@@ -94,11 +134,18 @@ const userSchema = new mongoose.Schema({
 });
 
 // Indexes to optimize admin customer listing queries
+userSchema.index({ tenantId: 1, email: 1 }, { unique: true });
+userSchema.index({ tenantId: 1, phoneNumber: 1 }, { unique: true, sparse: true });
+userSchema.index({ tenantId: 1, googleId: 1 }, { unique: true, sparse: true });
+userSchema.index({ tenantId: 1, facebookId: 1 }, { unique: true, sparse: true });
+userSchema.index({ tenantId: 1, appleId: 1 }, { unique: true, sparse: true });
 userSchema.index({ createdAt: -1 });
 userSchema.index({ role: 1, createdAt: -1 });
 userSchema.index({ phoneNumber: 1 });
 userSchema.index({ whatsappOptIn: 1 });
 userSchema.index({ provider: 1, googleId: 1 });
+userSchema.index({ provider: 1, facebookId: 1 });
+userSchema.index({ provider: 1, appleId: 1 });
 // Compound text index for name/email search (case-insensitive regex still used, but this can help if migrated to $text)
 // Note: Using weights in case future $text search introduced
 userSchema.index({ name: 'text', email: 'text' }, { weights: { name: 5, email: 10 }, name: 'UserTextIndex' });
@@ -138,6 +185,8 @@ userSchema.statics.createDefaultAdmin = async function() {
     console.error('Error creating default admin:', error);
   }
 };
+
+userSchema.plugin(tenantScopedModel);
 
 const User = mongoose.model('User', userSchema);
 

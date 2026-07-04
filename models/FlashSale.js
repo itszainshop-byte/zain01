@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const flashSaleItemSchema = new mongoose.Schema({
   product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -27,5 +28,7 @@ const flashSaleSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 flashSaleSchema.index({ startDate: 1, endDate: 1 });
+
+flashSaleSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('FlashSale', flashSaleSchema);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const backgroundSchema = new mongoose.Schema({
   name: {
@@ -45,6 +46,8 @@ backgroundSchema.statics.createDefaultBackground = async function() {
     console.error('Error creating default background:', error.message);
   }
 };
+
+backgroundSchema.plugin(tenantScopedModel);
 
 const Background = mongoose.model('Background', backgroundSchema);
 

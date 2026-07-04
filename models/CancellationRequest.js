@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const cancellationRequestSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
@@ -9,6 +10,8 @@ const cancellationRequestSchema = new mongoose.Schema({
   optIn: { type: Boolean, default: false },
   status: { type: String, enum: ['pending', 'resolved'], default: 'pending', index: true }
 }, { timestamps: true });
+
+cancellationRequestSchema.plugin(tenantScopedModel);
 
 const CancellationRequest = mongoose.model('CancellationRequest', cancellationRequestSchema);
 export default CancellationRequest;

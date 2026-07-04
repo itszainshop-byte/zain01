@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const attributeSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true, unique: true },
+  name: { type: String, required: true, trim: true },
   // Optional localized display names per language code, e.g., { ar: '...' , he: '...' }
   name_i18n: { type: Map, of: String, default: undefined },
-  slug: { type: String, index: true, unique: true, sparse: true },
+  slug: { type: String, index: true, sparse: true },
   type: { 
     type: String, 
     enum: ['text', 'number', 'color', 'size', 'material', 'select', 'multiselect'], 
@@ -32,11 +33,17 @@ attributeSchema.pre('save', async function(next) {
       .replace(/-+/g, '-');
     if (!base) return next();
     let candidate = base; let i = 1;
-    while (await mongoose.models.Attribute.findOne({ slug: candidate, _id: { $ne: this._id } })) {
+    const tenantFilter = this.tenantId ? { tenantId: this.tenantId } : {};
+    while (await mongoose.models.Attribute.findOne({ ...tenantFilter, slug: candidate, _id: { $ne: this._id } })) {
       candidate = `${base}-${i++}`; if (i > 50) break;
     }
     this.slug = candidate; next();
   } catch (e) { next(e); }
 });
+
+attributeSchema.index({ tenantId: 1, name: 1 }, { unique: true });
+attributeSchema.index({ tenantId: 1, slug: 1 }, { unique: true, sparse: true });
+
+attributeSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Attribute', attributeSchema);

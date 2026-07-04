@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const posUserSchema = new mongoose.Schema({
   user: {
@@ -61,7 +62,7 @@ const posUserSchema = new mongoose.Schema({
 });
 
 // Indexes for better performance
-posUserSchema.index({ user: 1 }, { unique: true });
+posUserSchema.index({ tenantId: 1, user: 1 }, { unique: true });
 posUserSchema.index({ employeeId: 1 });
 posUserSchema.index({ isActive: 1 });
 posUserSchema.index({ assignedRegisters: 1 });
@@ -87,5 +88,7 @@ posUserSchema.methods.updatePerformanceMetrics = async function(transactionAmoun
   this.averageTransactionValue = this.totalSales / this.totalTransactions;
   await this.save();
 };
+
+posUserSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('POSUser', posUserSchema);

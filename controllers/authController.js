@@ -6,35 +6,9 @@ import User from '../models/User.js';
 // we now issue signed JWT refresh tokens stored in HttpOnly cookies.
 // revokeUserTokens kept for compatibility when ROTATE_ON_REFRESH is used elsewhere.
 import { revokeUserTokens, consumeRefreshToken } from '../utils/refreshTokenStore.js';
-import { signUserJwt } from '../utils/jwt.js';
+import { getRefreshCookieOptions, issueAuthTokens } from '../utils/authTokens.js';
 import { normalizePhoneE164ish } from '../utils/phone.js';
-
-function issueTokens(res, userId) {
-  const accessToken = signUserJwt(userId, { expiresIn: process.env.ACCESS_TOKEN_TTL || '1h' });
-  const refreshTtlDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
-  const refreshTtlMs = refreshTtlDays * 24 * 60 * 60 * 1000;
-
-  // Stateless refresh token as JWT
-  const refreshSecret = process.env.REFRESH_JWT_SECRET || process.env.JWT_SECRET;
-  const refreshToken = jwt.sign({ sub: userId.toString(), type: 'refresh' }, refreshSecret, {
-    expiresIn: `${refreshTtlDays}d`
-  });
-
-  // Allow overriding cookie SameSite via env. For cross-site (Netlify/other -> Render) use SameSite=None; Secure.
-  const allowCrossSite = ['1','true','yes','on'].includes(String(process.env.ALLOW_CROSS_SITE_COOKIES || '').toLowerCase());
-  let cookieSameSite = (process.env.COOKIE_SAMESITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax')).toLowerCase();
-  if (allowCrossSite) cookieSameSite = 'none';
-  const sameSiteValue = ['lax','strict','none'].includes(cookieSameSite) ? cookieSameSite : 'lax';
-
-  res.cookie('rt', refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: sameSiteValue,
-    maxAge: refreshTtlMs,
-    path: '/api/auth'
-  });
-  return { accessToken, refreshTtlMs };
-}
+import { getWelcomeCouponCode } from '../utils/welcomeCoupon.js';
 
 export const promoteToAdmin = async (req, res) => {
   try {
@@ -66,6 +40,49 @@ export const promoteToAdmin = async (req, res) => {
   } catch (e) {
     console.error('promoteToAdmin error:', e);
     return res.status(500).json({ message: 'Failed to promote user' });
+  }
+};
+
+export const promoteToSuperAdmin = async (req, res) => {
+  try {
+    const { email, secret } = req.body || {};
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    if (!normalizedEmail) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const configuredSecret = String(process.env.SUPER_ADMIN_SETUP_TOKEN || '').trim();
+    if (!configuredSecret) {
+      return res.status(503).json({ message: 'SUPER_ADMIN_SETUP_TOKEN is not configured.' });
+    }
+    if (!secret || String(secret) !== configuredSecret) {
+      return res.status(403).json({ message: 'Invalid super-admin setup secret.' });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (!['admin', 'super_admin'].includes(user.role)) {
+      return res.status(400).json({ message: 'Only existing admins can be promoted to super_admin.' });
+    }
+
+    user.role = 'super_admin';
+    await user.save();
+
+    return res.json({
+      ok: true,
+      id: user._id,
+      email: user.email,
+      role: user.role,
+      image: user.image || null,
+      createdAt: user.createdAt,
+      lastLoginAt: user.lastLoginAt
+    });
+  } catch (e) {
+    console.error('promoteToSuperAdmin error:', e);
+    return res.status(500).json({ message: 'Failed to promote user to super_admin' });
   }
 };
 
@@ -108,10 +125,10 @@ export const register = async (req, res) => {
     await user.save();
 
     // Generate token
-    const { accessToken } = issueTokens(res, user._id);
+    const { accessToken, refreshToken } = issueAuthTokens(req, res, user._id);
 
-    // Send response
-    res.status(201).json({
+    const welcomeCouponCode = await getWelcomeCouponCode();
+    const payload = {
       token: accessToken,
       user: {
         id: user._id,
@@ -122,7 +139,16 @@ export const register = async (req, res) => {
         createdAt: user.createdAt,
         lastLoginAt: user.lastLoginAt
       }
-    });
+    };
+    if (refreshToken) {
+      payload.refreshToken = refreshToken;
+    }
+    if (welcomeCouponCode) {
+      payload.welcomeCoupon = { code: welcomeCouponCode };
+    }
+
+    // Send response
+    res.status(201).json(payload);
   } catch (error) {
     if (error?.code === 11000) {
       const duplicateField = Object.keys(error?.keyPattern || {})[0] || 'email';
@@ -165,10 +191,11 @@ export const login = async (req, res) => {
           provider: 'local'
         });
         await newUser.save();
-        const { accessToken } = issueTokens(res, newUser._id);
+        const { accessToken, refreshToken } = issueAuthTokens(req, res, newUser._id);
         return res.status(201).json({
           autoRegistered: true,
           token: accessToken,
+          ...(refreshToken ? { refreshToken } : {}),
           user: {
             id: newUser._id,
             name: newUser.name,
@@ -185,18 +212,24 @@ export const login = async (req, res) => {
       }
     }
 
-    // Check password
-    const isMatch = await bcrypt.compare(password, user.password);
+    // Check password (also try a trimmed variant to cover accidental spaces)
+    const pwdInput = String(password || '');
+    const pwdTrimmed = pwdInput.trim();
+    let isMatch = await bcrypt.compare(pwdInput, user.password);
+    if (!isMatch && pwdTrimmed !== pwdInput) {
+      isMatch = await bcrypt.compare(pwdTrimmed, user.password);
+    }
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
     // Generate token
-    const { accessToken } = issueTokens(res, user._id);
+    const { accessToken, refreshToken } = issueAuthTokens(req, res, user._id);
 
     // Send response
     res.json({
       token: accessToken,
+      ...(refreshToken ? { refreshToken } : {}),
       user: {
         id: user._id,
         name: user.name,
@@ -225,6 +258,13 @@ export const getCurrentUser = async (req, res) => {
       email: user.email,
       role: user.role,
       image: user.image || null,
+      phoneNumber: user.phoneNumber || '',
+      addressLine1: user.addressLine1 || '',
+      addressLine2: user.addressLine2 || '',
+      city: user.city || '',
+      state: user.state || '',
+      postalCode: user.postalCode || '',
+      country: user.country || '',
       createdAt: user.createdAt,
       lastLoginAt: user.lastLoginAt
     });
@@ -239,7 +279,7 @@ export const isAdmin = async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
-    return res.json({ isAdmin: user.role === 'admin', email: user.email, role: user.role });
+    return res.json({ isAdmin: ['admin', 'super_admin'].includes(user.role), email: user.email, role: user.role });
   } catch (e) {
     return res.status(500).json({ message: 'Failed to check admin status' });
   }
@@ -251,7 +291,8 @@ export const refresh = async (req, res) => {
     if (['1','true','yes','on'].includes(String(process.env.DISABLE_REFRESH_FLOW || '').toLowerCase())) {
       return res.status(400).json({ message: 'Refresh flow disabled' });
     }
-    const rt = req.cookies?.rt;
+    const headerRefreshToken = req.headers['x-refresh-token'];
+    const rt = req.cookies?.rt || (Array.isArray(headerRefreshToken) ? headerRefreshToken[0] : headerRefreshToken) || req.body?.refreshToken;
     if (!rt) {
       console.warn('[auth][refresh] 401 missing_cookie origin=', req.headers.origin);
       return res.status(401).json({ message: 'Missing refresh token' });
@@ -281,8 +322,8 @@ export const refresh = async (req, res) => {
     if (process.env.ROTATE_ON_REFRESH === '1') {
       try { revokeUserTokens(user._id.toString()); } catch {}
     }
-    const { accessToken } = issueTokens(res, user._id);
-    return res.json({ token: accessToken, user: { id: user._id, name: user.name, email: user.email, role: user.role, image: user.image || null, createdAt: user.createdAt, lastLoginAt: user.lastLoginAt } });
+    const { accessToken, refreshToken } = issueAuthTokens(req, res, user._id);
+    return res.json({ token: accessToken, ...(refreshToken ? { refreshToken } : {}), user: { id: user._id, name: user.name, email: user.email, role: user.role, image: user.image || null, createdAt: user.createdAt, lastLoginAt: user.lastLoginAt } });
   } catch (e) {
     console.error('Refresh error:', e);
     return res.status(500).json({ message: 'Failed to refresh session' });
@@ -295,7 +336,7 @@ export const logout = async (req, res) => {
     const rt = req.cookies?.rt;
     if (rt) {
       revokeUserTokens(req.user?._id?.toString() || '');
-      res.clearCookie('rt', { path: '/api/auth' });
+      res.clearCookie('rt', getRefreshCookieOptions());
     }
     return res.json({ ok: true });
   } catch (e) {

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const announcementSchema = new mongoose.Schema({
   text: {
@@ -70,6 +71,12 @@ const announcementSchema = new mongoose.Schema({
     enum: ['Truck', 'Sparkles', 'Clock', 'CreditCard', 'Star', 'Gift', 'Heart', 'Tag'],
     default: 'Star'
   },
+  iconSize: {
+    type: Number,
+    min: [12, 'Icon size cannot be less than 12'],
+    max: [48, 'Icon size cannot be greater than 48'],
+    default: 18
+  },
   fontSize: {
     type: String,
     enum: ['xs', 'sm', 'base', 'lg', 'xl'],
@@ -106,5 +113,7 @@ const announcementSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+announcementSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Announcement', announcementSchema);

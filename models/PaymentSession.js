@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const PaymentSessionSchema = new mongoose.Schema({
-  gateway: { type: String, enum: ['icredit', 'zcredit', 'grow', 'meshulam', 'hypay', 'paypal'], required: true, default: 'icredit' },
+  gateway: { type: String, enum: ['icredit', 'zcredit'], required: true, default: 'icredit' },
   status: { type: String, enum: ['created', 'approved', 'failed', 'confirmed'], default: 'created', index: true },
   reference: { type: String, index: true },
   orderNumber: { type: String, index: true },
@@ -53,12 +54,6 @@ const PaymentSessionSchema = new mongoose.Schema({
   totalWithShipping: { type: Number },
   cardChargeAmount: { type: Number },
 
-  wallet: {
-    // Records the wallet platform used for the transaction (Apple Pay / Google Pay)
-    platform: { type: String, enum: ['applepay', 'googlepay'] },
-    used: { type: Boolean, default: false }
-  },
-
   // For linking results
   orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
   paymentDetails: { type: mongoose.Schema.Types.Mixed },
@@ -70,6 +65,8 @@ const PaymentSessionSchema = new mongoose.Schema({
 
 // TTL index (expireAfterSeconds: 0 == expire exactly at expiresAt)
 PaymentSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+PaymentSessionSchema.plugin(tenantScopedModel);
 
 const PaymentSession = mongoose.model('PaymentSession', PaymentSessionSchema);
 export default PaymentSession;

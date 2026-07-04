@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const heroSchema = new mongoose.Schema({
   title: {
@@ -24,16 +25,6 @@ const heroSchema = new mongoose.Schema({
   secondaryButtonText: {
     type: String,
     default: 'Explore Lookbook'
-  },
-  // Optional: product id for direct add-to-cart CTA
-  productId: {
-    type: String,
-    required: false
-  },
-  // Optional: up to 4 products to show in hero offers
-  offerProductIds: {
-    type: [String],
-    default: []
   },
   // Styling for primary CTA button
   primaryButtonBgColor: {
@@ -73,5 +64,7 @@ heroSchema.pre('validate', function(next) {
   }
   next();
 });
+
+heroSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Hero', heroSchema);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const categorySchema = new mongoose.Schema({
   name: {
@@ -19,11 +20,16 @@ const categorySchema = new mongoose.Schema({
   },
   slug: {
     type: String,
-    unique: true,
     lowercase: true
   },
   // Optional custom route override for storefront navigation
   route: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  // Optional custom route for mobile app (can differ from web route)
+  mobileRoute: {
     type: String,
     trim: true,
     default: null
@@ -99,7 +105,8 @@ categorySchema.pre('save', async function(next) {
         break;
       }
 
-      const existingCategory = await mongoose.model('Category').findOne({ slug });
+      const tenantFilter = this.tenantId ? { tenantId: this.tenantId } : {};
+      const existingCategory = await mongoose.model('Category').findOne({ ...tenantFilter, slug });
       
       if (!existingCategory) {
         break;
@@ -144,7 +151,7 @@ categorySchema.pre('save', async function(next) {
 });
 
 // Add index for slug with collation for case-insensitive uniqueness
-categorySchema.index({ slug: 1 }, { 
+categorySchema.index({ tenantId: 1, slug: 1 }, {
   unique: true,
   collation: { locale: 'en', strength: 2 }
 });
@@ -154,6 +161,8 @@ categorySchema.index({ parent: 1, order: 1 });
 categorySchema.index({ ancestors: 1 });
 categorySchema.index({ path: 1 });
 // Enforce name uniqueness per parent (case-insensitive)
-categorySchema.index({ parent: 1, name: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
+categorySchema.index({ tenantId: 1, parent: 1, name: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
+
+categorySchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Category', categorySchema);

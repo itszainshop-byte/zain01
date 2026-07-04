@@ -1,6 +1,5 @@
 import mongoose from 'mongoose';
 import Product from '../models/Product.js';
-import Order from '../models/Order.js';
 import { Parser as Json2csvParser } from 'json2csv';
 // Get stock levels for a product or a specific generated variant.
 // Supported path patterns:
@@ -144,16 +143,26 @@ const castObjectIdArray = (values) => {
     .filter((val) => Boolean(val));
 };
 
-async function resolveCategoryAndDescendants(categoryParam) {
+async function resolveCategoryAndDescendants(categoryParam, options = {}) {
+  const includeHiddenCategories = options?.includeHiddenCategories === true;
   if (!categoryParam) return null;
   let catDoc = null;
   if (typeof categoryParam === 'string' && /^[a-fA-F0-9]{24}$/.test(categoryParam)) {
-    catDoc = await Category.findById(categoryParam).select('_id');
+    catDoc = await Category.findOne({
+      _id: categoryParam,
+      ...(includeHiddenCategories ? {} : { isActive: { $ne: false } })
+    }).select('_id');
   } else if (typeof categoryParam === 'string') {
-    catDoc = await Category.findOne({ $or: [ { slug: categoryParam }, { name: new RegExp(`^${categoryParam}$`, 'i') } ] }).select('_id');
+    catDoc = await Category.findOne({
+      $or: [ { slug: categoryParam }, { name: new RegExp(`^${categoryParam}$`, 'i') } ],
+      ...(includeHiddenCategories ? {} : { isActive: { $ne: false } })
+    }).select('_id');
   }
   if (!catDoc) return { ids: null, notFound: true };
-  const descendants = await Category.find({ $or: [ { _id: catDoc._id }, { ancestors: catDoc._id } ] }).select('_id');
+  const descendants = await Category.find({
+    $or: [ { _id: catDoc._id }, { ancestors: catDoc._id } ],
+    ...(includeHiddenCategories ? {} : { isActive: { $ne: false } })
+  }).select('_id');
   return { ids: descendants.map(d => d._id.toString()), notFound: false };
 }
 
@@ -161,6 +170,7 @@ const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 async function buildProductQuery(params) {
   const { search, category, categories, brand, isNew, isFeatured, onSale, includeInactive, colors, sizes, size, color, minPrice, maxPrice, primaryOnly, strictCategory, tag, tags } = params;
+  const includeHiddenCategories = includeInactive === 'true';
   let query = {};
 
   const trimmedSearch = typeof search === 'string' ? search.trim() : '';
@@ -204,7 +214,7 @@ async function buildProductQuery(params) {
   }
 
   if (category) {
-    const resolved = await resolveCategoryAndDescendants(category);
+    const resolved = await resolveCategoryAndDescendants(category, { includeHiddenCategories });
     if (resolved?.notFound) {
       // Force empty query
       query.$and = [...(query.$and || []), { _id: { $in: [] } }];
@@ -225,7 +235,7 @@ async function buildProductQuery(params) {
       // Expand each to include descendants if possible (ignore notFound tokens silently)
       const allIds = new Set();
       for (const token of listRaw) {
-        const resolved = await resolveCategoryAndDescendants(token);
+        const resolved = await resolveCategoryAndDescendants(token, { includeHiddenCategories });
         if (resolved?.ids?.length) {
           resolved.ids.forEach(id => allIds.add(id));
         } else if (!resolved?.notFound) {
@@ -268,6 +278,17 @@ async function buildProductQuery(params) {
   if (tagList.length) query.tags = { $in: tagList };
 
   if (!includeInactive || includeInactive === 'false') query.isActive = { $ne: false };
+  if (!includeHiddenCategories) {
+    const hiddenCategories = await Category.find({ isActive: false }).select('_id').lean();
+    const hiddenCategoryIds = castObjectIdArray(hiddenCategories.map((cat) => cat._id));
+    if (hiddenCategoryIds.length) {
+      query.$and = [
+        ...(query.$and || []),
+        { category: { $nin: hiddenCategoryIds } },
+        { categories: { $not: { $elemMatch: { $in: hiddenCategoryIds } } } }
+      ];
+    }
+  }
   if (brand) {
     const brandId = toObjectId(brand);
     if (brandId) {
@@ -1089,17 +1110,6 @@ export const getProduct = async (req, res) => {
       } else {
         productObj._variantNotFound = true;
       }
-    }
-
-    try {
-      // Compute real buyers: number of completed orders that include this product
-      const realBuyers = await Order.countDocuments({ 'items.product': product._id, paymentStatus: 'completed' });
-      productObj.realBuyerCount = Number(realBuyers || 0);
-      const fake = Number(productObj.fakeBuyerCount || 0);
-      productObj.displayBuyerCount = fake + productObj.realBuyerCount;
-    } catch (e) {
-      // Non-fatal: log and continue without real buyer counts
-      try { console.warn('[getProduct] failed to compute real buyer count', e?.message || e); } catch {}
     }
 
     res.json(productObj);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const pageSettingsSchema = new mongoose.Schema(
   {
@@ -17,7 +18,7 @@ const pageSettingsSchema = new mongoose.Schema(
 const pageSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
-    slug: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    slug: { type: String, required: true, lowercase: true, trim: true },
     content: { type: String, default: '' },
     status: { type: String, enum: ['draft', 'published'], default: 'draft' },
     metaTitle: { type: String, default: '' },
@@ -29,8 +30,10 @@ const pageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-pageSchema.index({ slug: 1 }, { unique: true });
+pageSchema.index({ tenantId: 1, slug: 1 }, { unique: true });
 pageSchema.index({ status: 1, updatedAt: -1 });
 pageSchema.index({ title: 'text', content: 'text', metaTitle: 'text', metaDescription: 'text' });
+
+pageSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Page', pageSchema);

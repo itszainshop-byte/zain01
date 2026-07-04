@@ -1,41 +1,91 @@
 import { OAuth2Client } from 'google-auth-library';
 import User from '../models/User.js';
-import { signUserJwt } from '../utils/jwt.js';
-import jwt from 'jsonwebtoken';
+import { issueAuthTokens } from '../utils/authTokens.js';
+import { getWelcomeCouponCode } from '../utils/welcomeCoupon.js';
+import Settings from '../models/Settings.js';
+import { normalizePhoneE164ish } from '../utils/phone.js';
 
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const client = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID ||
+  process.env.GOOGLE_EXPO_CLIENT_ID ||
+  process.env.GOOGLE_ANDROID_CLIENT_ID ||
+  process.env.GOOGLE_IOS_CLIENT_ID ||
+  process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID ||
+  process.env.EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID ||
+  process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID ||
+  process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID
+);
+
+function buildAllowedGoogleAudiences(settings) {
+  const extraAudiences = String(process.env.GOOGLE_EXTRA_AUDIENCES || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+  const raw = [
+    settings?.googleAuth?.clientId,
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_EXPO_CLIENT_ID,
+    process.env.GOOGLE_IOS_CLIENT_ID,
+    process.env.GOOGLE_ANDROID_CLIENT_ID,
+    process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID,
+    process.env.EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID,
+    process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+    process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    ...extraAudiences,
+  ];
+  return Array.from(new Set(raw.map((v) => String(v || '').trim()).filter(Boolean)));
+}
 
 
 // POST /api/auth/google
 // Body: { credential: string } from Google Identity Services one-tap / button
 export const googleAuth = async (req, res) => {
   try {
-    const { credential } = req.body || {};
+    const { credential, phoneNumber, region } = req.body || {};
     if (!credential) {
       return res.status(400).json({ message: 'Missing Google credential' });
     }
+    const normalizedPhoneNumber = typeof phoneNumber === 'string'
+      ? (normalizePhoneE164ish(phoneNumber, region) || '')
+      : '';
+
+    const settings = await Settings.findOne();
+    const allowedAudiences = buildAllowedGoogleAudiences(settings);
+    if (!allowedAudiences.length) {
+      return res.status(500).json({ message: 'Google auth is not configured' });
+    }
 
     // Verify token with Google
-    const ticket = await client.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID
-    });
+    let ticket;
+    try {
+      ticket = await client.verifyIdToken({
+        idToken: credential,
+        audience: allowedAudiences
+      });
+    } catch (verifyError) {
+      return res.status(401).json({
+        message: 'Invalid Google token',
+        detail: verifyError?.message || 'Token verification failed',
+        allowedAudiences,
+      });
+    }
 
-    const payload = ticket.getPayload();
-    if (!payload) {
+    const googlePayload = ticket.getPayload();
+    if (!googlePayload) {
       return res.status(401).json({ message: 'Invalid Google token' });
     }
 
-    const googleId = payload.sub;
-    const email = (payload.email || '').toLowerCase();
-    const name = payload.name || payload.given_name || 'User';
-    const picture = payload.picture;
+    const googleId = googlePayload.sub;
+    const email = (googlePayload.email || '').toLowerCase();
+    const name = googlePayload.name || googlePayload.given_name || 'User';
+    const picture = googlePayload.picture;
 
     if (!email) {
       return res.status(400).json({ message: 'Google account missing email (possibly unverified)' });
     }
 
     let user = await User.findOne({ $or: [ { googleId }, { email } ] });
+    let isNewUser = false;
 
     if (!user) {
       // Create new OAuth user (no password)
@@ -44,11 +94,13 @@ export const googleAuth = async (req, res) => {
         email,
         provider: 'google',
         googleId,
+        phoneNumber: normalizedPhoneNumber || undefined,
         image: picture,
         role: 'user',
         lastLoginAt: new Date()
       });
       await user.save();
+      isNewUser = true;
     } else {
       // Update any changed profile info & google linkage
       let modified = false;
@@ -60,31 +112,14 @@ export const googleAuth = async (req, res) => {
     }
 
     // Access token (short-lived) and refresh token (longer-lived) for persistence
-    const accessTtl = 60 * 60; // 1h seconds
-    const accessToken = signUserJwt(user._id, { expiresIn: '1h' });
-    const refreshTtlDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
-    const refreshTtlMs = refreshTtlDays * 24 * 60 * 60 * 1000;
-    const refreshSecret = process.env.REFRESH_JWT_SECRET || process.env.JWT_SECRET;
-    const refreshToken = jwt.sign({ sub: user._id.toString(), type: 'refresh' }, refreshSecret, { expiresIn: `${refreshTtlDays}d` });
+    const accessTtl = 60 * 60;
+    const { accessToken, refreshToken } = issueAuthTokens(req, res, user._id, { accessExpiresIn: '1h' });
 
-    // Cookie options aligned with authController.issueTokens (cross-site friendly when enabled)
-    const allowCrossSite = ['1','true','yes','on'].includes(String(process.env.ALLOW_CROSS_SITE_COOKIES || '').toLowerCase());
-    let cookieSameSite = (process.env.COOKIE_SAMESITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax')).toLowerCase();
-    if (allowCrossSite) cookieSameSite = 'none';
-    const sameSiteValue = ['lax','strict','none'].includes(cookieSameSite) ? cookieSameSite : 'lax';
-
-    // Send refresh token as HttpOnly cookie
-    res.cookie('rt', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: sameSiteValue,
-      maxAge: refreshTtlMs,
-      path: '/api/auth'
-    });
-
-    return res.json({
+    const welcomeCouponCode = isNewUser ? await getWelcomeCouponCode() : '';
+    const payload = {
       token: accessToken,
       expiresIn: accessTtl,
+      requiresPhoneNumber: !!(isNewUser && !user.phoneNumber),
       user: {
         id: user._id,
         name: user.name,
@@ -93,7 +128,15 @@ export const googleAuth = async (req, res) => {
         image: user.image || null,
         provider: user.provider
       }
-    });
+    };
+    if (refreshToken) {
+      payload.refreshToken = refreshToken;
+    }
+    if (welcomeCouponCode) {
+      payload.welcomeCoupon = { code: welcomeCouponCode };
+    }
+
+    return res.json(payload);
   } catch (error) {
     console.error('Google auth error:', error);
     return res.status(500).json({ message: 'Google authentication failed' });

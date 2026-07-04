@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 // Translation cache for AI-provided translations (e.g., DeepSeek)
 // Uniqueness is enforced by (from, to, hash). Hash is computed from normalized source text and optional contextKey.
@@ -17,8 +18,10 @@ const translationSchema = new mongoose.Schema({
   lastUsedAt: { type: Date, default: null }
 }, { timestamps: true });
 
-translationSchema.index({ from: 1, to: 1, hash: 1 }, { unique: true, name: 'uniq_from_to_hash' });
+translationSchema.index({ tenantId: 1, from: 1, to: 1, hash: 1 }, { unique: true, name: 'uniq_tenant_from_to_hash' });
 translationSchema.index({ contextKey: 1 });
+
+translationSchema.plugin(tenantScopedModel);
 
 const Translation = mongoose.models.Translation || mongoose.model('Translation', translationSchema);
 export default Translation;

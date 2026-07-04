@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const productSchema = new mongoose.Schema({
   name: {
@@ -165,7 +166,6 @@ const productSchema = new mongoose.Schema({
   // SEO & Marketing
   slug: {
     type: String,
-    unique: true,
     sparse: true,
     index: true
   },
@@ -181,28 +181,6 @@ const productSchema = new mongoose.Schema({
   imagesVersion: {
     type: Number,
     default: 0
-  },
-  // Display-only fake buyer count (admin-managed promotional number)
-  fakeBuyerCount: {
-    type: Number,
-    default: 0,
-    min: 0
-  },
-  // Per-product visitor counter enable/disable (admin controlled)
-  visitorCounterEnabled: {
-    type: Boolean,
-    default: true,
-    index: true
-  },
-  // Persistent total views for this product
-  visitorViewCount: {
-    type: Number,
-    default: 0,
-    min: 0
-  },
-  // Last time the product received a page view
-  visitorLastViewAt: {
-    type: Date
   },
   // Per-product size guide (دليل المقاسات)
   sizeGuide: {
@@ -271,12 +249,12 @@ const productSchema = new mongoose.Schema({
 // Optional Rivhit item id mapping at product level (for simple single-SKU products)
 productSchema.add({ rivhitItemId: { type: Number } });
 // Prevent duplicates when importing from Rivhit; allow sparse so most products can be without mapping
-try { productSchema.index({ rivhitItemId: 1 }, { unique: true, sparse: true }); } catch {}
+try { productSchema.index({ rivhitItemId: 1 }, { sparse: true }); } catch {}
 
 // Some Rivhit deployments expose a string code instead of numeric id in Item.List
 // Track a unique string code as a fallback key for deduplication
 productSchema.add({ rivhitItemCode: { type: String, trim: true } });
-try { productSchema.index({ rivhitItemCode: 1 }, { unique: true, sparse: true }); } catch {}
+try { productSchema.index({ rivhitItemCode: 1 }, { sparse: true }); } catch {}
 
 // MCG Gateway mapping (optional dedupe/traceability)
 productSchema.add({
@@ -284,8 +262,14 @@ productSchema.add({
   mcgBarcode: { type: String, trim: true }
 });
 // Enforce uniqueness by MCG item id to prevent duplicates on repeated syncs (sparse to allow products without mapping)
-try { productSchema.index({ mcgItemId: 1 }, { unique: true, sparse: true }); } catch {}
+try { productSchema.index({ mcgItemId: 1 }, { sparse: true }); } catch {}
 try { productSchema.index({ mcgBarcode: 1 }, { sparse: true }); } catch {}
+
+// Multi-tenant uniqueness guards.
+try { productSchema.index({ tenantId: 1, slug: 1 }, { unique: true, sparse: true }); } catch {}
+try { productSchema.index({ tenantId: 1, rivhitItemId: 1 }, { unique: true, sparse: true }); } catch {}
+try { productSchema.index({ tenantId: 1, rivhitItemCode: 1 }, { unique: true, sparse: true }); } catch {}
+try { productSchema.index({ tenantId: 1, mcgItemId: 1 }, { unique: true, sparse: true }); } catch {}
 
 // Virtual for average rating
 productSchema.virtual('averageRating').get(function() {
@@ -340,7 +324,8 @@ productSchema.pre('save', async function(next) {
     if (!base) return next();
     let candidate = base;
     let i = 1;
-    while (await mongoose.models.Product.findOne({ slug: candidate, _id: { $ne: this._id } })) {
+    const tenantFilter = this.tenantId ? { tenantId: this.tenantId } : {};
+    while (await mongoose.models.Product.findOne({ ...tenantFilter, slug: candidate, _id: { $ne: this._id } })) {
       candidate = `${base}-${i++}`;
       if (i > 50) break; // safety cap
     }
@@ -350,5 +335,7 @@ productSchema.pre('save', async function(next) {
     next(err);
   }
 });
+
+productSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('Product', productSchema);

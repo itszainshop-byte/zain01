@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const attributeValueSchema = new mongoose.Schema({
   attribute: { type: mongoose.Schema.Types.ObjectId, ref: 'Attribute', required: true, index: true },
@@ -16,7 +17,7 @@ const attributeValueSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true }
 }, { timestamps: true });
 
-attributeValueSchema.index({ attribute: 1, value: 1 }, { unique: true });
+attributeValueSchema.index({ tenantId: 1, attribute: 1, value: 1 }, { unique: true });
 
 attributeValueSchema.pre('save', async function(next) {
   try {
@@ -33,5 +34,7 @@ attributeValueSchema.pre('save', async function(next) {
     next();
   } catch (e) { next(e); }
 });
+
+attributeValueSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('AttributeValue', attributeValueSchema);

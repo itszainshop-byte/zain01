@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const scheduledPushSchema = new mongoose.Schema({
   title: { type: String, required: true },
@@ -15,6 +16,8 @@ const scheduledPushSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 scheduledPushSchema.index({ status: 1, scheduleAt: 1 });
+
+scheduledPushSchema.plugin(tenantScopedModel);
 
 const ScheduledPush = mongoose.model('ScheduledPush', scheduledPushSchema);
 export default ScheduledPush;

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const inventoryHistorySchema = new mongoose.Schema({
   product: {
@@ -35,8 +36,10 @@ const inventoryHistorySchema = new mongoose.Schema({
 });
 
 // Performance indexes for analytics queries filtered/sorted by time and product
-try { inventoryHistorySchema.index({ timestamp: -1 }); } catch {}
-try { inventoryHistorySchema.index({ product: 1, timestamp: -1 }); } catch {}
-try { inventoryHistorySchema.index({ user: 1, timestamp: -1 }); } catch {}
+try { inventoryHistorySchema.index({ tenantId: 1, timestamp: -1 }); } catch {}
+try { inventoryHistorySchema.index({ tenantId: 1, product: 1, timestamp: -1 }); } catch {}
+try { inventoryHistorySchema.index({ tenantId: 1, user: 1, timestamp: -1 }); } catch {}
+
+inventoryHistorySchema.plugin(tenantScopedModel);
 
 export default mongoose.model('InventoryHistory', inventoryHistorySchema);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const BookingAuditSchema = new mongoose.Schema({
   booking: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true },
@@ -10,5 +11,7 @@ const BookingAuditSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 BookingAuditSchema.index({ booking: 1, createdAt: -1 });
+
+BookingAuditSchema.plugin(tenantScopedModel);
 
 export default mongoose.models.BookingAudit || mongoose.model('BookingAudit', BookingAuditSchema);

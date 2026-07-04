@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const pushLogSchema = new mongoose.Schema({
   title: String,
@@ -14,6 +15,8 @@ const pushLogSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 pushLogSchema.index({ sentAt: -1 });
+
+pushLogSchema.plugin(tenantScopedModel);
 
 const PushLog = mongoose.model('PushLog', pushLogSchema);
 export default PushLog;

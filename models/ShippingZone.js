@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const shippingZoneSchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Zone name is required'],
-    unique: true,
     trim: true
   },
   description: {
@@ -99,5 +99,9 @@ shippingZoneSchema.statics.findByRegion = function(region) {
     isActive: true
   });
 };
+
+shippingZoneSchema.index({ tenantId: 1, name: 1 }, { unique: true });
+
+shippingZoneSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('ShippingZone', shippingZoneSchema);

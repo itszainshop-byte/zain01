@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import tenantScopedModel from './plugins/tenantScopedModel.js';
 
 const footerLinkSchema = new mongoose.Schema({
   name: {
@@ -32,5 +33,7 @@ const footerLinkSchema = new mongoose.Schema({
 
 // Add index for section and order
 footerLinkSchema.index({ section: 1, order: 1 });
+
+footerLinkSchema.plugin(tenantScopedModel);
 
 export default mongoose.model('FooterLink', footerLinkSchema);
