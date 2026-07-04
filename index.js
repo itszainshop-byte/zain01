@@ -91,8 +91,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Environment Variables: load project/.env first, then server/.env to override
+const runtimePort = process.env.PORT;
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 dotenv.config({ path: path.resolve(__dirname, './.env'), override: true });
+// On Cloud Run, PORT is injected at runtime and must not be overridden by .env files.
+if (runtimePort) {
+  process.env.PORT = runtimePort;
+}
 
 const app = express();
 
@@ -104,11 +109,15 @@ app.use(tenantContext);
 let APP_VERSION = process.env.APP_VERSION || '';
 try {
   if (!APP_VERSION) {
-    // Attempt to read version from package.json one directory up
-    const pkg = await import(path.resolve(__dirname, '../package.json'), { with: { type: 'json' } }).catch(() => null);
-    APP_VERSION = pkg?.default?.version || '0.0.0-dev';
+    // Read version from package.json one directory up without import attributes for broad Node compatibility.
+    const pkgPath = path.resolve(__dirname, '../package.json');
+    const pkgRaw = fs.readFileSync(pkgPath, 'utf8');
+    const pkg = JSON.parse(pkgRaw);
+    APP_VERSION = pkg?.version || '0.0.0-dev';
   }
-} catch {}
+} catch {
+  APP_VERSION = APP_VERSION || '0.0.0-dev';
+}
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -373,19 +382,31 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-const PORT = process.env.PORT || 8080;
+const isCloudRun = Boolean(process.env.K_SERVICE || process.env.K_REVISION || process.env.CLOUD_RUN_JOB);
+const PORT = isCloudRun ? 8080 : (process.env.PORT || 8080);
+process.env.PORT = String(PORT);
 
 // Create HTTP server
 const server = createServer(app);
 let serverListening = false;
 
 function ensureServerListening() {
-  if (serverListening) return;
-  server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
-  });
-  serverListening = true;
+  if (serverListening || server.listening) return;
+  try {
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+      console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
+    });
+    serverListening = true;
+  } catch (err) {
+    if (err?.code === 'EADDRINUSE') {
+      // In rare duplicate-bootstrap situations, avoid crashing the process.
+      console.warn(`[startup] Port ${PORT} already in use; skipping duplicate listen.`);
+      serverListening = true;
+      return;
+    }
+    throw err;
+  }
 }
 
 // WebSocket setup (explicit upgrade handling for stability behind proxies)
@@ -691,7 +712,13 @@ const startServer = async () => {
 };
 
 // Start server
-startServer();
+const START_GUARD_KEY = '__MYPETS_SERVER_START_CALLED__';
+if (!globalThis[START_GUARD_KEY]) {
+  globalThis[START_GUARD_KEY] = true;
+  startServer();
+} else {
+  console.warn('[startup] startServer already called once in this process; skipping duplicate bootstrap.');
+}
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {

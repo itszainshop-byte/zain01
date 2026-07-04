@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 // 1) project/.env (web + server defaults)
 // 2) server/.env (server-specific overrides)
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
-dotenv.config({ path: path.resolve(__dirname, '../.env'), override: true });
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 // Support both standard and Vite-style prefixes
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || process.env.VITE_CLOUDINARY_CLOUD_NAME;
