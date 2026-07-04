@@ -42,7 +42,7 @@ class InventoryAnalyticsService {
         // Get current inventory data (lean for speed, minimal fields)
         const inventoryPromise = Inventory.find()
           .select('product quantity status lowStockThreshold lastUpdated location')
-          .populate('product', 'price') // only need price for total value
+          .populate('product', 'price name isActive')
           .lean();
 
         // Estimate reserved units from open orders (pending -> shipped)
@@ -56,8 +56,10 @@ class InventoryAnalyticsService {
 
         const [inventory, openOrders] = await Promise.all([inventoryPromise, openOrdersPromise]);
 
+        const activeInventory = inventory.filter((item) => item?.product && item.product.isActive !== false);
+
         // Compute totals
-        const totalValue = inventory.reduce((sum, item) => {
+        const totalValue = activeInventory.reduce((sum, item) => {
           const price = item.product?.price || 0;
           const qty = Number(item.quantity) || 0;
           return sum + (qty * price);
@@ -75,7 +77,7 @@ class InventoryAnalyticsService {
         const valueChange = previousInventory > 0 ? ((totalValue - previousInventory) / previousInventory) * 100 : 0;
 
         // Robust totals and unique counts
-        const totalItems = inventory.reduce((sum, item) => {
+        const totalItems = activeInventory.reduce((sum, item) => {
           const qty = Number(item.quantity);
           return sum + (Number.isFinite(qty) && qty > 0 ? qty : 0);
         }, 0);
@@ -83,23 +85,25 @@ class InventoryAnalyticsService {
         const reservedUnits = openOrders.reduce((sum, o) => sum + (o.items?.reduce((s, it) => s + (Number(it.quantity) || 0), 0) || 0), 0);
         const availableUnits = Math.max(0, totalItems - reservedUnits);
 
-        const uniqueProducts = (() => {
-          const ids = new Set();
-          for (const item of inventory) {
-            const pid = item.product?._id?.toString?.() || (typeof item.product === 'string' ? item.product : null);
-            if (pid) ids.add(pid);
-          }
-          return ids.size;
-        })();
+        const productTotals = new Map();
+        for (const item of activeInventory) {
+          const pid = item.product?._id?.toString?.();
+          if (!pid) continue;
+          const existing = productTotals.get(pid) || {
+            quantity: 0,
+            threshold: 0
+          };
+          existing.quantity += Number(item.quantity) || 0;
+          existing.threshold = Math.max(existing.threshold, Number(item.lowStockThreshold) || 0);
+          productTotals.set(pid, existing);
+        }
 
-        const variantsInStockCount = inventory.reduce((sum, item) => sum + ((Number(item.quantity) || 0) > 0 ? 1 : 0), 0);
+        const uniqueProducts = productTotals.size;
+        const productOutOfStockCount = Array.from(productTotals.values()).filter((p) => p.quantity <= 0).length;
+        const productLowStockCount = Array.from(productTotals.values()).filter((p) => p.quantity > 0 && p.quantity <= p.threshold).length;
+        const productInStockCount = Math.max(0, uniqueProducts - productOutOfStockCount - productLowStockCount);
 
-        // Status breakdown and variant count (useful for UI)
-        const statusCounts = inventory.reduce((acc, item) => {
-          const st = item.status || 'in_stock';
-          acc[st] = (acc[st] || 0) + 1;
-          return acc;
-        }, {});
+        const variantsInStockCount = activeInventory.reduce((sum, item) => sum + ((Number(item.quantity) || 0) > 0 ? 1 : 0), 0);
 
         const [valueHistory, turnoverMetrics] = await Promise.all([valueHistoryPromise, turnoverPromise]);
 
@@ -110,11 +114,11 @@ class InventoryAnalyticsService {
           reservedUnits,
           availableUnits,
           uniqueProducts,
-          variantCount: inventory.length,
+          variantCount: activeInventory.length,
           variantsInStockCount,
-          inStockCount: statusCounts['in_stock'] || 0,
-          lowStockCount: statusCounts['low_stock'] || 0,
-          outOfStockCount: statusCounts['out_of_stock'] || 0,
+          inStockCount: productInStockCount,
+          lowStockCount: productLowStockCount,
+          outOfStockCount: productOutOfStockCount,
           turnoverRate: turnoverMetrics.averageTurnover,
           avgDaysInStock: turnoverMetrics.averageDaysInStock,
           valueHistory
@@ -186,6 +190,8 @@ class InventoryAnalyticsService {
       const startMs = start instanceof Date ? start.getTime() : Date.now() - 30 * DAY_MS;
       const endMs = end instanceof Date ? end.getTime() : Date.now();
       const daysInPeriod = Math.max(1, Math.ceil((endMs - startMs) / DAY_MS));
+      const categoryRows = await Category.find().select('name').lean();
+      const categoryMap = new Map(categoryRows.map((cat) => [cat._id.toString(), cat.name]));
       
       // Get inventory items with product details
       const inventory = await Inventory.find()
@@ -237,7 +243,7 @@ class InventoryAnalyticsService {
           product: {
             _id: item.product._id,
             name: item.product.name,
-            category: item.product.category || 'Uncategorized'
+            category: categoryMap.get(item.product.category?.toString()) || 'Uncategorized'
           },
           currentStock,
           averageStock,
@@ -359,7 +365,7 @@ class InventoryAnalyticsService {
   async getAlerts() {
     try {
       const inventory = await Inventory.find()
-        .populate('product', 'name')
+        .populate('product', 'name isActive')
         .lean();
 
       const alerts = {
@@ -369,48 +375,76 @@ class InventoryAnalyticsService {
         overstock: []
       };
 
+      const byProduct = new Map();
+
       for (const item of inventory) {
-        if (!item.product) continue;
+        const productId = item?.product?._id?.toString?.();
+        if (!productId || !item.product || item.product.isActive === false) continue;
 
-        // Low stock alerts
-        if (item.status === 'low_stock') {
-          alerts.lowStock.push({
-            product: item.product.name,
-            currentStock: item.quantity,
-            threshold: item.lowStockThreshold,
-            location: item.location || 'Main Warehouse'
-          });
+        const existing = byProduct.get(productId) || {
+          product: item.product.name,
+          currentStock: 0,
+          threshold: 0,
+          locationSet: new Set(),
+          lastUpdated: null
+        };
+
+        existing.currentStock += Number(item.quantity) || 0;
+        existing.threshold = Math.max(existing.threshold, Number(item.lowStockThreshold) || 0);
+        existing.locationSet.add(item.location || 'Main Warehouse');
+
+        const lu = item.lastUpdated ? new Date(item.lastUpdated) : null;
+        if (lu && !Number.isNaN(lu.getTime())) {
+          if (!existing.lastUpdated || lu > existing.lastUpdated) {
+            existing.lastUpdated = lu;
+          }
         }
 
-        // Out of stock alerts
-        if (item.status === 'out_of_stock') {
+        byProduct.set(productId, existing);
+      }
+
+      for (const data of byProduct.values()) {
+        const location = data.locationSet.size === 1
+          ? Array.from(data.locationSet)[0]
+          : 'Multiple locations';
+
+        if (data.currentStock <= 0) {
           alerts.outOfStock.push({
-            product: item.product.name,
-            location: item.location || 'Main Warehouse',
-            lastSold: new Date().toISOString() // Placeholder
+            product: data.product,
+            location,
+            lastSold: new Date().toISOString()
+          });
+        } else if (data.currentStock <= data.threshold) {
+          alerts.lowStock.push({
+            product: data.product,
+            currentStock: data.currentStock,
+            threshold: data.threshold,
+            location
           });
         }
 
-        // Dead stock (no movement for 90+ days) - simplified
-        if (item.quantity > 0 && this.getDaysSinceLastUpdate(item.lastUpdated) > 90) {
+        const daysInStock = this.getDaysSinceLastUpdate(data.lastUpdated);
+        if (data.currentStock > 0 && daysInStock > 90) {
           alerts.deadStock.push({
-            product: item.product.name,
-            daysInStock: this.getDaysSinceLastUpdate(item.lastUpdated),
-            currentStock: item.quantity,
-            location: item.location || 'Main Warehouse'
+            product: data.product,
+            daysInStock,
+            currentStock: data.currentStock,
+            location
           });
         }
 
-        // Overstock (quantity > 3x average demand) - simplified
-        if (item.quantity > 50) { // Simplified threshold
+        if (data.currentStock > 50) {
           alerts.overstock.push({
-            product: item.product.name,
-            currentStock: item.quantity,
-            averageDemand: 15, // Placeholder
-            location: item.location || 'Main Warehouse'
+            product: data.product,
+            currentStock: data.currentStock,
+            averageDemand: 15,
+            location
           });
         }
       }
+
+      alerts.lowStock.sort((a, b) => a.currentStock - b.currentStock);
+      alerts.outOfStock.sort((a, b) => String(a.product).localeCompare(String(b.product)));
 
       return alerts;
     } catch (error) {
@@ -696,6 +730,8 @@ class InventoryAnalyticsService {
 
   async getCostAnalysis(dateRange) {
     try {
+  const categoryRows = await Category.find().select('name').lean();
+  const categoryMap = new Map(categoryRows.map((cat) => [cat._id.toString(), cat.name]));
   const inventory = await Inventory.find().populate('product', 'name price category costPrice').lean();
       
       let totalInventoryValue = 0;
@@ -718,10 +754,11 @@ class InventoryAnalyticsService {
         totalCostValue += itemCost;
         totalPotentialProfit += itemProfit;
         
-        const category = item.product.category?.toString() || 'Uncategorized';
-        if (!categoryAnalysis.has(category)) {
-          categoryAnalysis.set(category, {
-            category,
+        const categoryId = item.product.category?.toString() || 'uncategorized';
+        const categoryName = categoryMap.get(categoryId) || 'Uncategorized';
+        if (!categoryAnalysis.has(categoryName)) {
+          categoryAnalysis.set(categoryName, {
+            category: categoryName,
             inventoryValue: 0,
             costValue: 0,
             potentialProfit: 0,
@@ -730,7 +767,7 @@ class InventoryAnalyticsService {
           });
         }
         
-        const catData = categoryAnalysis.get(category);
+        const catData = categoryAnalysis.get(categoryName);
         catData.inventoryValue += itemValue;
         catData.costValue += itemCost;
         catData.potentialProfit += itemProfit;

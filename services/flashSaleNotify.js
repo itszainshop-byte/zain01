@@ -8,9 +8,9 @@ function formatTitleBody(sale) {
   const title = `${titleBase.toUpperCase()} ${lightning}${lightning}`.slice(0, 80);
   let body;
   if (sale?.pricingMode === 'percent' && sale?.discountPercent) {
-    body = `İndirim başladı! %{${Number(sale.discountPercent).toFixed(0)}} fırsatlar seni bekliyor 🛒✨`;
+    body = `המבצע התחיל! מחכות לך הנחות עד ${Number(sale.discountPercent).toFixed(0)}% 🛒✨`;
   } else {
-    body = 'Big discounts have started! Choose your favorites now! 🛒✨';
+    body = 'הנחות גדולות התחילו! בחר את המועדפים שלך עכשיו! 🛒✨';
   }
   return { title, body };
 }

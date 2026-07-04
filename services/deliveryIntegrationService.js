@@ -175,47 +175,6 @@ function getByPath(obj, path) {
   return path.split('.').reduce((acc, key) => (acc ? acc[key] : undefined), obj);
 }
 
-function keepLast10PhoneDigits(value) {
-  const digits = value == null ? '' : String(value).replace(/\D+/g, '');
-  const configuredDialCodes = [
-    process.env.DEFAULT_COUNTRY_CODE,
-    process.env.TWILIO_DEFAULT_COUNTRY_CODE,
-    '972',
-    '970',
-    '962'
-  ]
-    .map(code => String(code || '').replace(/\D+/g, ''))
-    .filter(Boolean);
-
-  for (const dialCode of [...new Set(configuredDialCodes)]) {
-    if (!digits.startsWith(dialCode)) continue;
-    const national = digits.slice(dialCode.length);
-    if (national.length === 9) return `0${national}`;
-    if (national.length === 10) return national;
-  }
-
-  if (digits.length === 9) return `0${digits}`;
-  return digits.length > 10 ? digits.slice(-10) : digits;
-}
-
-function isCustomerMobileMapping(mapping) {
-  const source = String(mapping?.sourceField || '').toLowerCase();
-  const target = String(mapping?.targetField || '').toLowerCase();
-  return source === 'customerinfo.mobile' && /(mobile|phone|tel)/.test(target);
-}
-
-function inferJsonRpcMethodFromUrl(url) {
-  if (!url || typeof url !== 'string') return '';
-  try {
-    const parsed = new URL(url);
-    const segments = parsed.pathname.split('/').filter(Boolean);
-    const last = segments[segments.length - 1] || '';
-    return last;
-  } catch {
-    return '';
-  }
-}
-
 export function buildPayloadFromMappings(order, company) {
   const payload = {};
   const mappings = Array.isArray(company.fieldMappings) ? company.fieldMappings : [];
@@ -247,18 +206,10 @@ export function buildPayloadFromMappings(order, company) {
     } else if (m.transform === 'phone_digits' && typeof value === 'string') {
       value = value.replace(/\D+/g, '');
     } else if (m.transform === 'phone_last10') {
-      value = keepLast10PhoneDigits(value);
-    } else if (m.transform === 'paid_online') {
-      const status = String(getByPath(order, 'paymentStatus') || '').toLowerCase();
-      const method = String(getByPath(order, 'paymentMethod') || '').toLowerCase();
-      value = status === 'completed' && (method === 'card' || method === 'paypal');
-    } else if (m.transform === 'cod_amount' || m.transform === 'zero_if_paid') {
-      // Return 0 if paid online, otherwise return the source value (for COD orders)
-      const status = String(getByPath(order, 'paymentStatus') || '').toLowerCase();
-      const method = String(getByPath(order, 'paymentMethod') || '').toLowerCase();
-      const isPaidOnline = (status === 'completed' || status === 'paid') && 
-        (method === 'card' || method === 'paypal' || method === 'credit' || method === 'credit_card' || method === 'online');
-      value = isPaidOnline ? 0 : (value ?? 0);
+      const asStr = value == null ? '' : String(value);
+      const digits = asStr.replace(/\D+/g, '');
+      // Keep last 10 digits, common rule for local mobile numbers
+      value = digits.length > 10 ? digits.slice(-10) : digits;
     } else if (m.transform === 'to_string' && value !== undefined && value !== null) {
       value = String(value);
     } else if (m.transform === 'to_number' && value !== undefined && value !== null) {
@@ -273,27 +224,8 @@ export function buildPayloadFromMappings(order, company) {
         ? items.map(item => item.name).filter(Boolean)
         : [];
       value = names.length ? names.join(', ') : '';
-    } else if (m.transform === 'resolve_area_id' || m.transform === 'resolve_area_name' || m.transform === 'resolve_subarea_id' || m.transform === 'resolve_subarea_name') {
-      // Resolve city to delivery company area via areaMappings
-      const orderCity = getByPath(order, 'shippingAddress.city');
-      if (orderCity) {
-        const cityLower = String(orderCity).toLowerCase().trim();
-        const areaMappings = Array.isArray(company.areaMappings) ? company.areaMappings : [];
-        const areaMatch = areaMappings.find(mapping => {
-          const cities = Array.isArray(mapping.storeCities) ? mapping.storeCities : [];
-          return cities.some(c => String(c).toLowerCase().trim() === cityLower);
-        });
-        if (areaMatch) {
-          if (m.transform === 'resolve_area_id') value = areaMatch.areaId || '';
-          else if (m.transform === 'resolve_area_name') value = areaMatch.areaName || '';
-          else if (m.transform === 'resolve_subarea_id') value = areaMatch.subAreaId || '';
-          else if (m.transform === 'resolve_subarea_name') value = areaMatch.subAreaName || '';
-        }
-      }
     }
-    if (value !== undefined) {
-      payload[m.targetField] = isCustomerMobileMapping(m) ? keepLast10PhoneDigits(value) : value;
-    }
+    if (value !== undefined) payload[m.targetField] = value;
   }
 
   // Fallback to object fieldMapping if present (common simple map)
@@ -321,53 +253,6 @@ export function buildPayloadFromMappings(order, company) {
         if (value !== undefined) payload[target] = value;
       }
     });
-  }
-
-  // Resolve area mapping: look up order's city in company's areaMappings
-  // and add/override area/subArea fields with mapped values from the delivery company's system
-  const areaMappings = Array.isArray(company.areaMappings) ? company.areaMappings : [];
-  if (areaMappings.length > 0) {
-    const orderCity = getByPath(order, 'shippingAddress.city');
-    if (orderCity) {
-      const cityLower = String(orderCity).toLowerCase().trim();
-      // Find mapping where storeCities includes the order's city
-      const areaMatch = areaMappings.find(m => {
-        const cities = Array.isArray(m.storeCities) ? m.storeCities : [];
-        return cities.some(c => String(c).toLowerCase().trim() === cityLower);
-      });
-      if (areaMatch) {
-        // Add area fields to payload using the delivery company's area values
-        if (areaMatch.areaId) {
-          payload.area = areaMatch.areaId;
-          payload.area_id = areaMatch.areaId;
-        }
-        if (areaMatch.areaName) {
-          payload.area_name = areaMatch.areaName;
-        }
-        // If mapping is at subArea level, also add subArea fields
-        if (areaMatch.level === 'subArea') {
-          if (areaMatch.subAreaId) {
-            payload.sub_area = areaMatch.subAreaId;
-            payload.sub_area_id = areaMatch.subAreaId;
-            payload.subarea = areaMatch.subAreaId;
-          }
-          if (areaMatch.subAreaName) {
-            payload.sub_area_name = areaMatch.subAreaName;
-            payload.subarea_name = areaMatch.subAreaName;
-          }
-        }
-        debugLog('Resolved area mapping for city', {
-          orderCity,
-          areaId: areaMatch.areaId,
-          areaName: areaMatch.areaName,
-          subAreaId: areaMatch.subAreaId,
-          subAreaName: areaMatch.subAreaName,
-          level: areaMatch.level
-        });
-      } else {
-        debugLog('No area mapping found for city', { orderCity, availableMappings: areaMappings.length });
-      }
-    }
   }
 
   return payload;
@@ -407,9 +292,9 @@ export function validateCompanyConfiguration(company) {
   if (!isTest && !url) issues.push('missing_url');
 
   if (format === 'jsonrpc') {
-    const method = hubCfg?.method || company.apiConfiguration?.method || inferJsonRpcMethodFromUrl(url);
+    const method = hubCfg?.method || company.apiConfiguration?.method;
     const omit = hubCfg?.jsonrpcOmitMethod === true || company.apiConfiguration?.jsonrpcOmitMethod === true || company.apiConfiguration?.omitJsonRpcMethod === true;
-    if (!method && !omit) issues.push('missing_jsonrpc_method');
+  if (!method && !omit) issues.push('missing_jsonrpc_method');
   }
 
   if (authMethod === 'basic') {
@@ -544,7 +429,6 @@ async function sendJsonRpc(order, company, payload) {
   let url = company.apiUrl || company.apiConfiguration?.baseUrl;
   if (!url) throw new Error('Delivery company is missing API URL');
   const omit = company.apiConfiguration?.jsonrpcOmitMethod === true || company.apiConfiguration?.omitJsonRpcMethod === true;
-  const inferredMethod = inferJsonRpcMethodFromUrl(url);
   const globalParams = getGlobalDefaultParams();
   const envDb = process.env.DELIVERY_HUB_DB || process.env.ODOO_DB || process.env.DELIVERY_DB;
   const baseParams = { ...(globalParams || {}), ...(company.apiConfiguration?.params || {}) };
@@ -562,7 +446,7 @@ async function sendJsonRpc(order, company, payload) {
     ? { jsonrpc: '2.0', params }
     : {
         jsonrpc: '2.0',
-        method: company.apiConfiguration?.method || inferredMethod || 'create_order',
+        method: company.apiConfiguration?.method || 'create_order',
         params,
         id: Date.now()
       };

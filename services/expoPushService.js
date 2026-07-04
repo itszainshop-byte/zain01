@@ -10,7 +10,8 @@ function chunkArray(arr, size) {
 }
 
 function isExpoPushToken(token) {
-  return typeof token === 'string' && token.startsWith('ExponentPushToken[');
+  if (typeof token !== 'string') return false;
+  return /^Expo(?:nent)?PushToken\[[^\]]+\]$/.test(token.trim());
 }
 
 function jsonSafe(obj) {

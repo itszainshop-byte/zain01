@@ -9,6 +9,15 @@ import { realTimeEventService } from './realTimeEventService.js';
 import Settings from '../models/Settings.js';
 import { updateItemsQuantities, setItemsList, getItemsList } from './mcgService.js';
 
+function computeInventoryStatus(quantity, lowStockThreshold = 5) {
+  const qty = Number(quantity) || 0;
+  const threshold = Number(lowStockThreshold);
+  const safeThreshold = Number.isFinite(threshold) ? threshold : 5;
+  if (qty <= 0) return 'out_of_stock';
+  if (qty <= safeThreshold) return 'low_stock';
+  return 'in_stock';
+}
+
 class InventoryService {
   // Public: force recomputation of product and per-variant stock totals
   async recomputeProductStock(productId) {
@@ -334,13 +343,25 @@ class InventoryService {
   }
   async getAllInventory() {
     try {
+      const settings = await Settings.findOne().select('inventory.lowStockThreshold').lean();
+      const globalLowStockThresholdRaw = Number(settings?.inventory?.lowStockThreshold);
+      const globalLowStockThreshold = Number.isFinite(globalLowStockThresholdRaw) && globalLowStockThresholdRaw >= 1
+        ? Math.round(globalLowStockThresholdRaw)
+        : null;
       const inventory = await Inventory.find()
-        .populate('product', 'name images isActive')
+        .populate({ path: 'product', select: 'name images isActive brand supplier mcgBarcode mcgItemId', populate: { path: 'brand', select: 'name' } })
         .populate({ path: 'attributesSnapshot.attribute', select: 'name' })
         .populate({ path: 'attributesSnapshot.value', select: 'value' })
         .sort({ 'product.name': 1, size: 1, color: 1 });
       // Hide rows for products that are soft-deactivated
-      return inventory.filter(row => row?.product && row.product.isActive !== false);
+      return inventory
+        .filter(row => row?.product && row.product.isActive !== false)
+        .map((row) => {
+          const effectiveThreshold = globalLowStockThreshold ?? row.lowStockThreshold;
+          row.lowStockThreshold = effectiveThreshold;
+          row.status = computeInventoryStatus(row.quantity, effectiveThreshold);
+          return row;
+        });
     } catch (error) {
       throw new ApiError(StatusCodes.INTERNAL_SERVER_ERROR, 'Error fetching inventory');
     }
@@ -349,8 +370,12 @@ class InventoryService {
   // Paginated/filtered inventory query for admin UI
   async queryInventory({ page = 1, limit = 50, search = '', status = '', location = '', sort = '' } = {}) {
     try {
+      const settings = await Settings.findOne().select('inventory.lowStockThreshold').lean();
+      const globalLowStockThresholdRaw = Number(settings?.inventory?.lowStockThreshold);
+      const globalLowStockThreshold = Number.isFinite(globalLowStockThresholdRaw) && globalLowStockThresholdRaw >= 1
+        ? Math.round(globalLowStockThresholdRaw)
+        : null;
       const match = {};
-      if (status) match.status = status;
       if (location) match.location = location;
 
       const sortMap = {
@@ -370,11 +395,38 @@ class InventoryService {
 
       const pipeline = [
         { $match: match },
+        {
+          $addFields: {
+            computedStatus: {
+              $switch: {
+                branches: [
+                  { case: { $lte: ['$quantity', 0] }, then: 'out_of_stock' },
+                  {
+                    case: {
+                      $lte: [
+                        '$quantity',
+                        globalLowStockThreshold != null
+                          ? globalLowStockThreshold
+                          : { $ifNull: ['$lowStockThreshold', 5] }
+                      ]
+                    },
+                    then: 'low_stock'
+                  }
+                ],
+                default: 'in_stock'
+              }
+            }
+          }
+        },
         // Join product to search by name and filter inactive products out
         { $lookup: { from: 'products', localField: 'product', foreignField: '_id', as: 'product' } },
         { $unwind: '$product' },
         { $match: { 'product.isActive': { $ne: false } } },
       ];
+
+      if (status) {
+        pipeline.push({ $match: { computedStatus: status } });
+      }
 
       if (regex) {
         pipeline.push({
@@ -401,15 +453,21 @@ class InventoryService {
               // Keep product minimal to reduce payload
               { $project: {
                   _id: 1,
-                  product: { _id: '$product._id', name: '$product.name', images: '$product.images' },
+                  product: {
+                    _id: '$product._id',
+                    name: '$product.name',
+                    images: '$product.images',
+                    mcgBarcode: '$product.mcgBarcode',
+                    mcgItemId: '$product.mcgItemId'
+                  },
                   variantId: 1,
                   size: 1,
                   color: 1,
                   quantity: 1,
-                  lowStockThreshold: 1,
+                  lowStockThreshold: globalLowStockThreshold != null ? globalLowStockThreshold : '$lowStockThreshold',
                   warehouse: 1,
                   location: 1,
-                  status: 1,
+                  status: '$computedStatus',
                   attributesSnapshot: 1,
                   lastUpdated: 1,
                   createdAt: 1,
@@ -436,7 +494,7 @@ class InventoryService {
   async getProductInventory(productId) {
     try {
       const inventory = await Inventory.find({ product: productId })
-        .populate('product', 'name images')
+        .populate({ path: 'product', select: 'name images brand supplier', populate: { path: 'brand', select: 'name' } })
         .populate({ path: 'attributesSnapshot.attribute', select: 'name' })
         .populate({ path: 'attributesSnapshot.value', select: 'value' })
         .sort('size color');
@@ -454,9 +512,11 @@ class InventoryService {
         throw new ApiError(StatusCodes.NOT_FOUND, 'Inventory record not found');
       }
 
+      const status = computeInventoryStatus(quantity, prevInventory.lowStockThreshold);
+
       const inventory = await Inventory.findByIdAndUpdate(
         id,
-        { quantity },
+        { quantity, status, lastUpdated: new Date() },
         { new: true, runValidators: true }
       ).populate('product', 'name');
 
@@ -641,9 +701,12 @@ class InventoryService {
     try {
       const skus = [];
       const updates = items.map(async (item) => {
+        const previous = await Inventory.findById(item._id).select('lowStockThreshold');
+        if (!previous) return;
+        const status = computeInventoryStatus(item.quantity, previous.lowStockThreshold);
         const inventory = await Inventory.findByIdAndUpdate(
           item._id,
-          { quantity: item.quantity },
+          { quantity: item.quantity, status, lastUpdated: new Date() },
           { new: true }
         ).populate('product', 'name');
 
