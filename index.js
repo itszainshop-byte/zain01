@@ -130,7 +130,7 @@ const defaultAllowedOrigins = [
   'http://127.0.0.1:3000',
   'https://relaxed-cucurucho-360448.netlify.app',
   // Self origin (Render) – harmless for health checks and internal tools
-  'https://zain01-311868330365.europe-west1.run.app'
+  'https://zain01-534219343809.europe-west1.run.app'
 ];
 
 // Allow override via env (comma-separated list). Merge instead of replace to always keep dev/local origins.
@@ -374,13 +374,6 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-const runningOnCloudRun = !!process.env.K_SERVICE;
-const allowStartWithoutDb = (() => {
-  const explicit = process.env.ALLOW_START_WITHOUT_DB;
-  if (explicit == null || explicit === '') return runningOnCloudRun;
-  const normalized = String(explicit).trim().toLowerCase();
-  return ['1', 'true', 'yes', 'on'].includes(normalized);
-})();
 
 // Create HTTP server
 const server = createServer(app);
@@ -592,16 +585,7 @@ const startServer = async () => {
     console.error('Database connection failed after retries:', e.message);
   }
   if (!conn) {
-    const msg = 'Database connection failed.';
-    if (!allowStartWithoutDb) {
-      console.error(msg, 'Server not started. Set SKIP_DB=1 for dev or ALLOW_START_WITHOUT_DB=1 for degraded mode.');
-      return;
-    }
-    console.error(msg, 'Starting server in degraded mode (no DB) to satisfy platform health checks.');
-    server.listen(PORT, () => {
-      console.log(`Server running in degraded mode on port ${PORT}`);
-      console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
-    });
+    console.error('Database connection failed; server not started. Set SKIP_DB=1 to bypass during development.');
     return;
   }
 
