@@ -130,7 +130,7 @@ const defaultAllowedOrigins = [
   'http://127.0.0.1:3000',
   'https://relaxed-cucurucho-360448.netlify.app',
   // Self origin (Render) – harmless for health checks and internal tools
-  'https://mypet-778751110625.europe-west1.run.app'
+  'https://zain01-311868330365.europe-west1.run.app'
 ];
 
 // Allow override via env (comma-separated list). Merge instead of replace to always keep dev/local origins.
