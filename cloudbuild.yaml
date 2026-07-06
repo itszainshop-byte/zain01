@@ -4,7 +4,7 @@ substitutions:
   _MONGODB_URI: "mongodb+srv://omranmahmoud888:pass12345@cluster0.qaqt8ch.mongodb.net/mypets?retryWrites=true&w=majority&appName=Cluster0"
 
 steps:
-  # Build the Node API from the project app directory.
+  # Build the Node API from the GitHub repository root.
   - name: gcr.io/cloud-builders/docker
     id: Build Image
     args:
@@ -12,8 +12,8 @@ steps:
       - -t
       - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA
       - -f
-      - project/Dockerfile
-      - project
+      - Dockerfile
+      - .
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Deploy Service

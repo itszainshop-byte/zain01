@@ -44,8 +44,12 @@ RUN set -eux; \
 		else \
 			npm install --omit=dev; \
 		fi; \
-		test -f /app/project/server/index.js; \
-		node --input-type=module -e "await import('jose'); await import('./server/controllers/appleAuthController.js'); console.log('[diagnostic] apple auth runtime deps ok')"; \
+		if [ ! -f /app/project/server/index.js ] && [ ! -f /app/project/index.js ]; then \
+			echo "[error] No server entry found at server/index.js or index.js"; \
+			ls -la /app/project; \
+			exit 1; \
+		fi; \
+		node --input-type=module -e "await import('jose'); const fs = await import('node:fs'); if (fs.existsSync('./server/controllers/appleAuthController.js')) await import('./server/controllers/appleAuthController.js'); else if (fs.existsSync('./controllers/appleAuthController.js')) await import('./controllers/appleAuthController.js'); console.log('[diagnostic] apple auth runtime deps ok')"; \
 		rm -rf /tmp/context
 
 # Optional diagnostic: show where the server entry should be
